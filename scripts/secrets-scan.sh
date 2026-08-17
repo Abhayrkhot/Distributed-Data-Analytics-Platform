@@ -73,6 +73,9 @@ echo "== hardcoded credentials in tracked files =="
 # of the word "password" would flag documentation and column names, and a
 # scanner people learn to ignore protects nothing.
 PATTERNS=(
+  # A literal secret passed as an argument rather than assigned:
+  #     props.setProperty("password", "s3cr3t")
+  '"(password|passwd|secret|token|api_?key)"[[:space:]]*,[[:space:]]*"[^"$][^"]{3,}"'
   '(PASSWORD|PASSWD|SECRET|API_?KEY|ACCESS_?TOKEN|PRIVATE_?KEY)[[:space:]]*[:=][[:space:]]*["'"'"']?[A-Za-z0-9_./+-]{3,}'
   '(postgres|postgresql|mysql|clickhouse|mongodb|redis)://[^:/@[:space:]]+:[^@[:space:]]+@'
   'BEGIN (RSA|OPENSSH|DSA|EC|PGP) PRIVATE KEY'
@@ -104,6 +107,18 @@ for file in $FILES; do
             #     public static final String POSTGRES_PASSWORD = "POSTGRES_PASSWORD";
             # Narrow and safe to skip: a real secret cannot equal the name of the
             # constant holding it.
+            # An assignment whose right-hand side is a METHOD CALL with no string literal
+            # cannot be a hardcoded credential:
+            #     this.password = config.clickhousePassword();
+            # Requiring the parentheses matters: a bare unquoted value such as
+            #     aws_key = AKIAIOSFODNN7EXAMPLE
+            # has no literal either and must still be caught.
+            rhs=$(printf '%s' "$hit" | sed -nE 's/.*=(.*)/\1/p')
+            if [ -n "$rhs" ] \
+               && printf '%s' "$rhs" | grep -qE '[A-Za-z_][A-Za-z0-9_.]*\(' \
+               && ! printf '%s' "$rhs" | grep -q '"'; then
+                continue
+            fi
             ident=$(printf '%s' "$hit" | sed -nE 's/.*[[:space:]]([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=[[:space:]]*".*/\1/p')
             lit=$(printf '%s' "$hit" | sed -nE 's/.*=[[:space:]]*"([^"]*)".*/\1/p')
             if [ -n "$ident" ] && [ "$ident" = "$lit" ]; then

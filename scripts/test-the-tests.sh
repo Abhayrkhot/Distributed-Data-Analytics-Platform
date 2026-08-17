@@ -79,6 +79,12 @@ mutate_transform_it() {
     MUTATE_MODULE=""; MUTATE_PROFILE=""
 }
 
+# Guarantees that live in platform-stream.
+mutate_stream() {
+    MUTATE_MODULE=platform-stream mutate "$@"
+    MUTATE_MODULE=""
+}
+
 # mutate <guarantee> <file> <sed-script> <test-name-that-must-fail>
 mutate() {
     local guarantee="$1" file="$2" script="$3" expect="$4"
@@ -350,6 +356,35 @@ mutate_transform "gold: treat a null tip_pct as zero" "$GOLD" \
 mutate_transform_it "serving: append instead of upsert" "$SERVING" \
     's|                ON CONFLICT (kpi_date, vendor_name) DO UPDATE|                ON CONFLICT DO NOTHING; -- was: DO UPDATE|' \
     "Idempotent\|idempotent\|serving"
+
+echo
+echo "Streaming:"
+echo
+
+AGG=platform-stream/src/main/java/com/analyticsplatform/stream/job/WindowAggregator.java
+VALIDATOR=platform-stream/src/main/java/com/analyticsplatform/stream/event/EventValidator.java
+
+# A processing-time value in the aggregation makes every replay produce different rows,
+# so the ReplacingMergeTree version starts choosing between two different answers rather
+# than deduplicating one.
+# rand() rather than current_timestamp(): count(current_timestamp()) is EQUIVALENT to
+# count(*), since current_timestamp() is never null, so that mutant changes nothing and the
+# harness correctly reported the suite staying green. Mutation testing cannot tell an
+# equivalent mutant from a weak test - picking a genuinely non-equivalent mutant is the
+# author's job.
+mutate_stream "stream: nondeterminism in the aggregation" "$AGG" \
+    's|                        sum("total_amount").alias("total_revenue_raw"),|                        sum(col("total_amount").multiply(org.apache.spark.sql.functions.rand())).alias("total_revenue_raw"),|' \
+    "Determinis\|aggregatesCorrectly\|identical"
+
+# Accepting an unknown schema version means interpreting a producer we do not understand.
+mutate_stream "stream: accept any schema version" "$VALIDATOR" \
+    's|                                        EventEnvelope.CURRENT_SCHEMA_VERSION)),|                                        -999)),|' \
+    "unknown_schema_version\|Malformed\|everyMalformed"
+
+# Letting rejected events into the aggregate silently understates revenue.
+mutate_stream "stream: aggregate rejected events too" "$VALIDATOR" \
+    's|        return classified.filter(col("reject_reason").isNull()).drop("reject_reason");|        return classified.drop("reject_reason");|' \
+    "rejectedEvents\|oneBadMessage\|Malformed"
 
 echo
 printf '  %d guarantee(s) verified, %d insufficient\n\n' "$PASS" "$FAIL"

@@ -221,6 +221,9 @@
           <!-- §48: a flaky test is a defect. Deliberately no rerunFailingTestsCount:
                green-by-retry is exactly what the zero-flaky policy forbids. -->
           <trimStackTrace>false</trimStackTrace>
+          <!-- Integration tests are named *IT and are deliberately absent here:
+               the development loop must not require the six-service stack.
+               Run them with `mvn verify -Pintegration` or ./scripts/test-integration.sh -->
           <includes>
             <include>**/*Test.java</include>
             <include>**/*Properties.java</include>
@@ -269,6 +272,34 @@
   </build>
 
   <profiles>
+    <!-- `mvn test -Pintegration` additionally runs *IT classes, which require the
+         Docker stack to be up and the control-plane schema to be initialized. -->
+    <profile>
+      <id>integration</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-surefire-plugin</artifactId>
+            <configuration>
+              <!-- Additive, not a replacement. Running only *IT here would leave
+                   JaCoCo seeing no unit coverage, so `verify -Pgates,integration`
+                   would measure a fiction: DAO classes covered solely by ITs would
+                   count as untested and drag the bundle below its own threshold. -->
+              <includes>
+                <include>**/*Test.java</include>
+                <include>**/*Properties.java</include>
+                <include>**/*IT.java</include>
+              </includes>
+              <!-- Integration tests share one database, so they must not run
+                   concurrently against it. -->
+              <parallel>none</parallel>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+
     <!-- `mvn verify -Pgates` enforces the coverage thresholds. Kept off the
          default lifecycle so partial work in progress is not blocked. -->
     <profile>

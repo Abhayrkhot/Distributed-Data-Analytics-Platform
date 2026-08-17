@@ -5,6 +5,7 @@ import static com.analyticsplatform.common.schema.Schemas.of;
 import static com.analyticsplatform.common.schema.Schemas.oneColumn;
 import static com.analyticsplatform.common.schema.Schemas.type;
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.analyticsplatform.common.schema.SchemaCompatibility.ChangeType;
 import com.analyticsplatform.common.schema.SchemaCompatibility.SchemaDiff;
@@ -220,6 +221,102 @@ class SchemaCompatibilityTest {
 
             assertThat(diff.changeType()).isEqualTo(ChangeType.BREAKING);
             assertThat(diff.breakingReasons()).hasSizeGreaterThanOrEqualTo(3);
+        }
+    }
+
+    @Nested
+    @DisplayName("type kind changes")
+    class KindChanges {
+
+        /**
+         * Swapping one kind of type for another entirely. Each case exercises the "both sides are
+         * the same kind" guard from the failing side, which is where a careless instanceof pair
+         * would let an incompatible pair fall through to the widening ladder.
+         */
+        @Test
+        @DisplayName("a struct replaced by a primitive is breaking")
+        void structToPrimitive() {
+            StructType asStruct = of(f("v", of(f("inner", type("int")))));
+            StructType asString = of(f("v", type("string")));
+
+            assertThat(SchemaCompatibility.classify(asStruct, asString).changeType())
+                    .isEqualTo(ChangeType.BREAKING);
+            assertThat(SchemaCompatibility.classify(asString, asStruct).changeType())
+                    .isEqualTo(ChangeType.BREAKING);
+        }
+
+        @Test
+        @DisplayName("an array replaced by a primitive is breaking")
+        void arrayToPrimitive() {
+            StructType asArray = of(f("v", DataTypes.createArrayType(type("int"), true)));
+            StructType asInt = of(f("v", type("int")));
+
+            assertThat(SchemaCompatibility.classify(asArray, asInt).changeType())
+                    .isEqualTo(ChangeType.BREAKING);
+            assertThat(SchemaCompatibility.classify(asInt, asArray).changeType())
+                    .isEqualTo(ChangeType.BREAKING);
+        }
+
+        @Test
+        @DisplayName("a map replaced by an array is breaking")
+        void mapToArray() {
+            StructType asMap = of(f("v",
+                    DataTypes.createMapType(type("string"), type("int"), true)));
+            StructType asArray = of(f("v", DataTypes.createArrayType(type("int"), true)));
+
+            assertThat(SchemaCompatibility.classify(asMap, asArray).changeType())
+                    .isEqualTo(ChangeType.BREAKING);
+            assertThat(SchemaCompatibility.classify(asArray, asMap).changeType())
+                    .isEqualTo(ChangeType.BREAKING);
+        }
+
+        @Test
+        @DisplayName("a decimal replaced by a double is breaking")
+        void decimalToDouble() {
+            StructType asDecimal = of(f("v", type("decimal(10,2)")));
+            StructType asDouble = of(f("v", type("double")));
+
+            assertThat(SchemaCompatibility.classify(asDecimal, asDouble).changeType())
+                    .isEqualTo(ChangeType.BREAKING);
+            assertThat(SchemaCompatibility.classify(asDouble, asDecimal).changeType())
+                    .isEqualTo(ChangeType.BREAKING);
+        }
+
+        /** A nested struct whose inner shape is unchanged contributes no severity. */
+        @Test
+        @DisplayName("an unchanged nested struct is not a change")
+        void identicalNestedStructIsNoChange() {
+            StructType schema = of(f("outer", of(f("inner", type("int")))));
+
+            assertThat(SchemaCompatibility.classify(schema, schema).changeType())
+                    .isEqualTo(ChangeType.ADDITIVE);
+        }
+    }
+
+    @Nested
+    @DisplayName("input validation")
+    class InputValidation {
+
+        @Test
+        @DisplayName("a null current schema is rejected")
+        void nullCurrentSchemaIsRejected() {
+            assertThatThrownBy(() -> SchemaCompatibility.classify(oneColumn("long"), null))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("current schema must not be null");
+        }
+
+        /**
+         * Case-colliding siblings must be refused during classification too, not only during
+         * canonicalization — otherwise a diff would silently compare only one of them.
+         */
+        @Test
+        @DisplayName("case-colliding field names are rejected during classification")
+        void collidingNamesAreRejectedWhenClassifying() {
+            StructType colliding = of(f("Fare", type("double")), f("fare", type("double")));
+
+            assertThatThrownBy(() -> SchemaCompatibility.classify(oneColumn("long"), colliding))
+                    .isInstanceOf(IllegalArgumentException.class)
+                    .hasMessageContaining("duplicate field name");
         }
     }
 

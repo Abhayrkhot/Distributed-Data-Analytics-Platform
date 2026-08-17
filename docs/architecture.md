@@ -23,6 +23,47 @@ executor.memory (700m) + executor.memoryOverhead (256m) = 956m  <=  1000m
 
 Exceed it and the executor is never scheduled — the application hangs in `WAITING` with no error, which is a confusing failure to debug. See `conf/spark-defaults.conf`.
 
+## Verification
+
+`./scripts/verify-all.sh` is the gate: 7 stages, exit 0 only if all pass.
+
+| Stage | What it proves |
+|---|---|
+| environment | JDK 17 in use, Postgres and ClickHouse healthy |
+| compile | all modules build, shaded jars produced |
+| tests + coverage gates | 314 tests; ≥85% line, ≥80% branch overall, ≥90% branch on critical packages |
+| SQL constraint rejection | 33 invalid writes refused by the database |
+| test-the-tests | 14 guarantees each turn their own test red when broken |
+| secret scan | no credentials in tracked content |
+| test isolation | integration tests left no rows behind |
+
+### Coverage is measured across unit *and* integration tests
+
+The gate runs `mvn verify -Pgates,integration` — one invocation, so JaCoCo accumulates coverage
+from both. Splitting them across two invocations was actively misleading: classes covered only by
+integration tests (`JdbcControlPlane`, `LineageRecorder`, `SchemaRegistry`) read as untested and
+dragged the bundle from ~89% down to 65%, so the gate would have been measuring a fiction and
+inviting someone to "fix" it by lowering the threshold.
+
+The integration profile therefore *adds* `**/*IT.java` to the surefire includes rather than
+replacing them.
+
+### macOS/iCloud hazard: duplicate class files
+
+This repository lives under `~/Desktop`, and **iCloud Desktop & Documents sync is enabled**
+(the folder carries `com.apple.file-provider-domain-id`). iCloud duplicates files it observes
+changing mid-write, so a build can leave `TaskMetricsAccumulatorTest 7.class` beside
+`TaskMetricsAccumulatorTest.class` in `target/`. JaCoCo then aborts with:
+
+```
+Can't add different class with same name: com/analyticsplatform/common/config/PlatformConfig
+```
+
+That reads like a code failure and is not one. `verify-all.sh` and `test-the-tests.sh` sweep these
+before running. **The durable fix is to move the repository out of `~/Desktop` or `~/Documents`**
+— `.gitignore` has no effect on iCloud, and `target/` is exactly the kind of high-churn directory
+that provokes it.
+
 ## Credentials
 
 **No credential appears in any tracked file, local or otherwise.**

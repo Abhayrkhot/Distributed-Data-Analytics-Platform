@@ -96,7 +96,7 @@ mutate() {
         return
     fi
 
-    local output
+    local output rc
     if [ "${MUTATE_PROFILE:-}" = "integration" ]; then
         output="$(PG_JDBC_URL="$PG_JDBC_URL_LOCAL" CH_JDBC_URL="$CH_JDBC_URL_LOCAL" \
                   KAFKA_BOOTSTRAP="$KAFKA_BOOTSTRAP_HOST" \
@@ -106,9 +106,20 @@ mutate() {
         # step avoids it failing on stale duplicate class files in target/.
         output="$(mvn -B -q -Djacoco.skip=true -pl "${MUTATE_MODULE:-platform-common}" test 2>&1)"
     fi
+    rc=$?
     cp "$BACKUP_DIR/$key.bak" "$PROJECT_ROOT/$file"
 
-    if ! grep -q "Tests run:.*Failures: [1-9]\|Tests run:.*Errors: [1-9]\|BUILD FAILURE" <<<"$output"; then
+    # A mutation that does not COMPILE proves nothing about the tests: the suite never
+    # ran. mvn -q suppresses "BUILD FAILURE" because it is INFO level, so this has to be
+    # detected explicitly - otherwise a broken mutation reads as "the tests are weak",
+    # which understates coverage and sends you chasing a test that was fine all along.
+    if grep -q "COMPILATION ERROR\|cannot find symbol\|package .* does not exist" <<<"$output"; then
+        printf '  \033[31mFAIL\033[0m  %-46s mutation did not compile (fix the mutation)\n' "$guarantee"
+        FAIL=$((FAIL + 1))
+        return
+    fi
+
+    if [ "$rc" -eq 0 ] && ! grep -q "Tests run:.*Failures: [1-9]\|Tests run:.*Errors: [1-9]" <<<"$output"; then
         printf '  \033[31mFAIL\033[0m  %-46s broke the guarantee, suite stayed GREEN\n' "$guarantee"
         FAIL=$((FAIL + 1))
         return
@@ -310,6 +321,35 @@ mutate_transform_it "silver job: skip the inapplicable-rule check" "$SILVERJOB" 
 mutate_transform_it "silver job: record lineage regardless of outcome" "$SILVERJOB" \
     's|            if (outcome.published()) {|            if (true) {|' \
     "NoLineage\|lineage"
+
+echo
+echo "Gold aggregates and serving:"
+echo
+
+GOLD=platform-transform/src/main/java/com/analyticsplatform/transform/gold/GoldAggregates.java
+SERVING=platform-transform/src/main/java/com/analyticsplatform/transform/gold/ServingWriter.java
+
+# A dropped group is internally consistent and looks entirely plausible alone. Only
+# comparing totals to silver catches it - this is what reconciliation is for.
+mutate_transform "gold: drop a group from borough_od" "$GOLD" \
+    '/Borough-to-borough origin/{n;n;s|withDateParts(silver)|withDateParts(silver).filter("pickup_borough <> \x27Queens\x27")|;}' \
+    "reconcil\|borough_od\|groupCounts"
+
+# Without the window partition, every share is computed against the grand total and
+# they no longer sum to 1.0 within a day.
+mutate_transform "gold: revenue share without the partition" "$GOLD" \
+    's|                .over(Window.partitionBy(col("pickup_date"), col("source")));|                .over(Window.partitionBy(org.apache.spark.sql.functions.lit(1)));|' \
+    "sharesSumToOne\|revenue_share\|Share"
+
+# coalesce(tip_pct, 0) reinstates exactly the bias the silver null decision removed.
+mutate_transform "gold: treat a null tip_pct as zero" "$GOLD" \
+    's|                        round4(avg("tip_pct")).alias("avg_tip_pct"));|                        round4(avg(org.apache.spark.sql.functions.coalesce(col("tip_pct"), org.apache.spark.sql.functions.lit(0.0)))).alias("avg_tip_pct"));|' \
+    "NullAverage\|allNullGroup\|mixedGroup\|tip_pct"
+
+# Append instead of upsert doubles the serving rows on every rerun.
+mutate_transform_it "serving: append instead of upsert" "$SERVING" \
+    's|                ON CONFLICT (kpi_date, vendor_name) DO UPDATE|                ON CONFLICT DO NOTHING; -- was: DO UPDATE|' \
+    "Idempotent\|idempotent\|serving"
 
 echo
 printf '  %d guarantee(s) verified, %d insufficient\n\n' "$PASS" "$FAIL"

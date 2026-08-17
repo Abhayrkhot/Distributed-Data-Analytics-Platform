@@ -1,0 +1,5 @@
+source,pickup_ts,reason
+yellow,2024-01-16 12:00:00,negative_fare
+yellow,2024-01-16 13:00:00,dropoff_not_after_pickup
+yellow,2024-01-17 10:00:00,null_timestamp
+green,2024-01-16 17:00:00,distance_out_of_range

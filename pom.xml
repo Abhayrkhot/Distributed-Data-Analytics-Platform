@@ -218,6 +218,12 @@
           <!-- @{argLine} (not ${argLine}) so JaCoCo's agent, injected late, is
                preserved rather than clobbered. -->
           <argLine>@{argLine} ${spark.test.jvm.args}</argLine>
+          <systemPropertyVariables>
+            <!-- Arms the fail-point mechanism for tests only. FailPoint.arm() throws
+                 without this, so a stray arm() in production code fails loudly at the
+                 call site instead of quietly making a job abortable. -->
+            <platform.failpoints.enabled>true</platform.failpoints.enabled>
+          </systemPropertyVariables>
           <!-- §48: a flaky test is a defect. Deliberately no rerunFailingTestsCount:
                green-by-retry is exactly what the zero-flaky policy forbids. -->
           <trimStackTrace>false</trimStackTrace>

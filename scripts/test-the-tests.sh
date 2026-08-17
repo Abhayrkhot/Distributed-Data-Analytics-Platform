@@ -57,6 +57,17 @@ mutate_it() {
     MUTATE_PROFILE=""
 }
 
+# Same contract, but for guarantees that live in platform-ingest.
+mutate_ingest() {
+    MUTATE_MODULE=platform-ingest mutate "$@"
+    MUTATE_MODULE=""
+}
+
+mutate_ingest_it() {
+    MUTATE_MODULE=platform-ingest MUTATE_PROFILE=integration mutate "$@"
+    MUTATE_MODULE=""; MUTATE_PROFILE=""
+}
+
 # mutate <guarantee> <file> <sed-script> <test-name-that-must-fail>
 mutate() {
     local guarantee="$1" file="$2" script="$3" expect="$4"
@@ -78,11 +89,11 @@ mutate() {
     if [ "${MUTATE_PROFILE:-}" = "integration" ]; then
         output="$(PG_JDBC_URL="$PG_JDBC_URL_LOCAL" CH_JDBC_URL="$CH_JDBC_URL_LOCAL" \
                   KAFKA_BOOTSTRAP="$KAFKA_BOOTSTRAP_HOST" \
-                  mvn -B -q -Pintegration -Djacoco.skip=true -pl platform-common test 2>&1)"
+                  mvn -B -q -Pintegration -Djacoco.skip=true -pl "${MUTATE_MODULE:-platform-common}" -am -DskipTests=false test 2>&1)"
     else
         # Coverage is irrelevant to a mutation run, and skipping the JaCoCo report
         # step avoids it failing on stale duplicate class files in target/.
-        output="$(mvn -B -q -Djacoco.skip=true -pl platform-common test 2>&1)"
+        output="$(mvn -B -q -Djacoco.skip=true -pl "${MUTATE_MODULE:-platform-common}" test 2>&1)"
     fi
     cp "$BACKUP_DIR/$key.bak" "$PROJECT_ROOT/$file"
 
@@ -212,6 +223,38 @@ mutate_it "lineage: stop deduplicating edges" "$LINEAGE" \
 mutate_it "control plane: allow overwriting a terminal run" "$JDBCCP" \
     's|            if (updated == 0) {|            if (false) {|' \
     "doubleFinish\|RUNNING state"
+
+echo
+echo "Bronze publish protocol:"
+echo
+
+PUBLISHER=platform-ingest/src/main/java/com/analyticsplatform/ingest/publish/StagedPublisher.java
+UNITSTORE=platform-ingest/src/main/java/com/analyticsplatform/ingest/publish/ProcessingUnitStore.java
+NORMALIZER=platform-ingest/src/main/java/com/analyticsplatform/ingest/source/SourceNormalizer.java
+
+# The single most dangerous shortcut: treating files in the target as committed.
+# That is what turns a crash into silent data loss.
+mutate_ingest_it "publish: adopt an uncommitted target" "$PUBLISHER" \
+    '/discarding uncommitted target/{n;s|deleteRecursively(target);|;|;}' \
+    "Uncommitted\|discard\|crashAfterPromotion"
+
+# Detecting corruption but leaving the unit COMPLETE makes it unclaimable forever
+# - strictly worse than not detecting it. This is the bug the suite already caught.
+mutate_ingest_it "publish: detect corruption but skip the reset" "$UNITSTORE" \
+    's|               AND (status <> .RUNNING. OR lease_expires_at < now())|               AND false|' \
+    "Rebuilt\|rebuild\|Inconsistent"
+
+# Without the WHERE guard the claim becomes a plain upsert and every concurrent
+# worker believes it owns the unit.
+mutate_ingest_it "publish: claim without the status guard" "$UNITSTORE" \
+    's|             WHERE control.processing_unit.status IN (.PENDING., .FAILED.)|             WHERE true OR control.processing_unit.status IN (\x27PENDING\x27, \x27FAILED\x27)|' \
+    "concurrent\|committedUnitIsNotClaimable\|Serialize"
+
+# Bronze must reject nothing: a row vanishing between file and warehouse with no
+# record of why is the failure silver's rules exist to make visible.
+mutate_ingest "normalizer: filter invalid rows at bronze" "$NORMALIZER" \
+    's|        return raw.select(projection);|        return raw.select(projection).filter("fare_amount >= 0");|' \
+    "invalidRows\|NoFiltering\|retained"
 
 echo
 printf '  %d guarantee(s) verified, %d insufficient\n\n' "$PASS" "$FAIL"

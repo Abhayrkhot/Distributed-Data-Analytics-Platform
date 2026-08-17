@@ -249,6 +249,65 @@ public final class PlatformConfig {
         return get(CLICKHOUSE_PASSWORD);
     }
 
+    /**
+     * ClickHouse host, parsed from the JDBC URL.
+     *
+     * <p>Derived rather than configured separately. The native Spark connector wants host, port and
+     * database as discrete settings while JDBC wants one URL; carrying both as independent config
+     * would let them drift, and a job pointed at two different ClickHouse instances by two code
+     * paths is a genuinely confusing failure to diagnose. One source of truth, parsed.
+     */
+    public String clickhouseHost() {
+        return clickhouseUri().getHost();
+    }
+
+    /** ClickHouse HTTP port, parsed from the JDBC URL; 8123 when the URL omits it. */
+    public int clickhouseHttpPort() {
+        int port = clickhouseUri().getPort();
+        return port == -1 ? 8123 : port;
+    }
+
+    /** ClickHouse database, parsed from the JDBC URL path. */
+    public String clickhouseDatabase() {
+        String path = clickhouseUri().getPath();
+        if (path == null || path.length() <= 1) {
+            throw new IllegalStateException(
+                    "ClickHouse URL names no database: " + redactUrl(clickhouseUrl()));
+        }
+        return path.substring(1);
+    }
+
+    /**
+     * Strips any {@code user:password@} portion before a URL reaches an exception message.
+     *
+     * <p>Our config keeps credentials in separate properties, but a JDBC URL is allowed to embed
+     * them, and an exception message is exactly the string that ends up in a log aggregator. Safe
+     * by construction rather than by the current shape of the config.
+     */
+    static String redactUrl(String url) {
+        if (url == null) {
+            return "null";
+        }
+        int at = url.lastIndexOf('@');
+        int schemeEnd = url.indexOf("//");
+        if (at < 0 || schemeEnd < 0 || at < schemeEnd) {
+            return url;
+        }
+        return url.substring(0, schemeEnd + 2) + "***@" + url.substring(at + 1);
+    }
+
+    /** Strips the {@code jdbc:} prefix so the remainder parses as a URI. */
+    private java.net.URI clickhouseUri() {
+        String url = clickhouseUrl();
+        String withoutPrefix = url.startsWith("jdbc:") ? url.substring("jdbc:".length()) : url;
+        try {
+            return new java.net.URI(withoutPrefix);
+        } catch (java.net.URISyntaxException e) {
+            throw new IllegalStateException(
+                    "ClickHouse URL is not parseable: " + redactUrl(url), e);
+        }
+    }
+
     public String kafkaBootstrap() {
         return get(KAFKA_BOOTSTRAP);
     }

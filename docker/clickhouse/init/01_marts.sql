@@ -32,7 +32,9 @@ ORDER BY location_id;
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS analytics.fact_trip
 (
-    trip_key             UInt64,
+    -- Derived dedup key from silver, not a source primary key: TLC data has no unique
+    -- trip id. String rather than UInt64 because it is a SHA-256 hex digest.
+    trip_key             String,
     source               LowCardinality(String),     -- 'yellow' | 'green'
     vendor_id            LowCardinality(String),
     pickup_ts            DateTime      CODEC(DoubleDelta, ZSTD(1)),
@@ -49,12 +51,8 @@ CREATE TABLE IF NOT EXISTS analytics.fact_trip
     dropoff_borough      LowCardinality(String),
     dropoff_zone         LowCardinality(String),
     payment_type         LowCardinality(String),
-    rate_code            LowCardinality(String),
     fare_amount          Decimal(10, 2),
     tip_amount           Decimal(10, 2),
-    tolls_amount         Decimal(10, 2),
-    surcharge_amount     Decimal(10, 2),
-    congestion_surcharge Decimal(10, 2),
     -- Present only in 2025+ files; defaulted for older partitions. This column
     -- is the schema-evolution case the ingest layer has to handle for real.
     cbd_congestion_fee   Decimal(10, 2) DEFAULT 0,
@@ -64,6 +62,11 @@ CREATE TABLE IF NOT EXISTS analytics.fact_trip
     etl_run_id           UInt64,
     ingested_at          DateTime DEFAULT now()
 )
+-- Columns are exactly what silver publishes. The DDL originally carried rate_code,
+-- tolls_amount, surcharge_amount and congestion_surcharge, which silver's pinned contract
+-- does not produce; total_amount already includes them. Reinstating the breakdown means
+-- deliberately changing the silver contract and its golden dataset, not quietly widening
+-- this table until an insert happens to line up.
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(pickup_ts)
 ORDER BY (pickup_location_id, pickup_ts)

@@ -68,6 +68,17 @@ mutate_ingest_it() {
     MUTATE_MODULE=""; MUTATE_PROFILE=""
 }
 
+# Guarantees that live in platform-transform.
+mutate_transform() {
+    MUTATE_MODULE=platform-transform mutate "$@"
+    MUTATE_MODULE=""
+}
+
+mutate_transform_it() {
+    MUTATE_MODULE=platform-transform MUTATE_PROFILE=integration mutate "$@"
+    MUTATE_MODULE=""; MUTATE_PROFILE=""
+}
+
 # mutate <guarantee> <file> <sed-script> <test-name-that-must-fail>
 mutate() {
     local guarantee="$1" file="$2" script="$3" expect="$4"
@@ -255,6 +266,50 @@ mutate_ingest_it "publish: claim without the status guard" "$UNITSTORE" \
 mutate_ingest "normalizer: filter invalid rows at bronze" "$NORMALIZER" \
     's|        return raw.select(projection);|        return raw.select(projection).filter("fare_amount >= 0");|' \
     "invalidRows\|NoFiltering\|retained"
+
+echo
+echo "Silver and data quality:"
+echo
+
+DQRULE=platform-transform/src/main/java/com/analyticsplatform/transform/dq/DqRule.java
+DQENGINE=platform-transform/src/main/java/com/analyticsplatform/transform/dq/DqEngine.java
+SILVER=platform-transform/src/main/java/com/analyticsplatform/transform/silver/SilverTransform.java
+SILVERJOB=platform-transform/src/main/java/com/analyticsplatform/transform/job/SilverTransformJob.java
+
+# > vs >= decides whether a run landing exactly on its threshold aborts.
+mutate_transform "dq: threshold > becomes >=" "$DQRULE" \
+    's|            case MAX_VIOLATION_COUNT -> rowsViolated > thresholdValue.longValue();|            case MAX_VIOLATION_COUNT -> rowsViolated >= thresholdValue.longValue();|' \
+    "exactlyAtLimit\|countBoundary\|boundary"
+
+# Ignoring the null policy silently lets an all-null column pass every range rule.
+mutate_transform "dq: ignore the null policy" "$DQENGINE" \
+    's|            case VIOLATION -> isNull.or(raw.and(isNull.unary_\$bang()));|            case VIOLATION -> raw.and(isNull.unary_$bang());|' \
+    "nullPolicy\|EntirelyNull\|VIOLATION"
+
+# A WARN that blocks turns advisory checks into outages.
+mutate_transform "dq: treat WARN as blocking" "$DQENGINE" \
+    's|            return !passed && rule.severity() == DqRule.Severity.FAIL;|            return !passed;|' \
+    "onlyFailSeverityBlocks\|warnDoesNotBlock\|WARN"
+
+# Zero rather than null for a zero-fare trip drags down every average containing it.
+mutate_transform "silver: tip_pct zero instead of null for a zero fare" "$SILVER" \
+    '193s|lit(null).cast(DataTypes.DoubleType)|lit(0.0)|' \
+    "zeroFare\|tip_pct\|Golden"
+
+# dropDuplicates picks an arbitrary survivor, so identical input can yield different output.
+mutate_transform "silver: flip the dedup tiebreaker" "$SILVER" \
+    '170s|asc_nulls_last|desc_nulls_last|' \
+    "partialDuplicate\|survivor\|Determinis"
+
+# Publishing before the gate means invalid data is already served when the alarm fires.
+mutate_transform_it "silver job: skip the inapplicable-rule check" "$SILVERJOB" \
+    's|        if (!inapplicable.isEmpty()) {|        if (false) {|' \
+    "absentColumn\|Misconfiguration"
+
+# Lineage before the commit claims a derivation that may never have happened.
+mutate_transform_it "silver job: record lineage regardless of outcome" "$SILVERJOB" \
+    's|            if (outcome.published()) {|            if (true) {|' \
+    "NoLineage\|lineage"
 
 echo
 printf '  %d guarantee(s) verified, %d insufficient\n\n' "$PASS" "$FAIL"

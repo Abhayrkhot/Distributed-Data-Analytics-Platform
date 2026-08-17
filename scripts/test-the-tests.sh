@@ -89,7 +89,12 @@ mutate_stream() {
 mutate() {
     local guarantee="$1" file="$2" script="$3" expect="$4"
     local key
-    key="$(echo "$file" | tr '/' '_')"
+    # Unique per MUTATION, not per file. Keying on the path alone means two mutations
+    # targeting the same file share a backup slot: the second cp overwrites the first's
+    # backup with already-mutated content, and the restore then silently leaves the
+    # source broken. That happened once and deleted a schemaRegistry.register() call.
+    MUTATION_SEQ=$((${MUTATION_SEQ:-0} + 1))
+    key="$(printf '%03d_%s' "$MUTATION_SEQ" "$(echo "$file" | tr '/' '_')")"
 
     cp "$PROJECT_ROOT/$file" "$BACKUP_DIR/$key.bak"
     printf '%s\n' "$file" > "$BACKUP_DIR/$key.path"
@@ -387,10 +392,45 @@ mutate_stream "stream: aggregate rejected events too" "$VALIDATOR" \
     "rejectedEvents\|oneBadMessage\|Malformed"
 
 echo
+echo "End-to-end seams:"
+echo
+
+BRONZEJOB=platform-ingest/src/main/java/com/analyticsplatform/ingest/job/BronzeIngestJob.java
+
+# Registering the schema after the write means a breaking upstream change is only
+# noticed once a staging directory has already been filled.
+mutate_ingest_it "bronze job: register schema after publishing" "$BRONZEJOB" \
+    's|            schemaRegistry.register(dataset, normalized.schema());|            // moved|' \
+    "schema\|Schema\|register"
+
+# Lineage recorded regardless of outcome claims a derivation that may never have happened.
+mutate_ingest_it "bronze job: record lineage even when nothing published" "$BRONZEJOB" \
+    's|            if (outcome.published()) {|            if (true) {|' \
+    "ineage\|noPublicationNoLineage"
+
+echo
 printf '  %d guarantee(s) verified, %d insufficient\n\n' "$PASS" "$FAIL"
 
 echo "restoring and confirming the suite is green again..."
 restore_all
+
+# The harness edits tracked source, so a silent restore failure would leave a broken
+# tree that looks fine until a later build. Compare against git rather than trusting
+# the copy-back.
+if ! git -C "$PROJECT_ROOT" diff --quiet -- '*.java' '*.csv' 2>/dev/null; then
+    echo "  ERROR: tracked source differs from HEAD after restore:" >&2
+    git -C "$PROJECT_ROOT" diff --stat -- '*.java' '*.csv' >&2
+    exit 1
+fi
+echo "  tracked source matches HEAD"
+
+# Restoring sources is not enough: every mutation recompiled, so target/ still holds
+# classes built from mutated code. An interrupted run leaves those behind and the next
+# build fails with NoClassDefFoundError on a nested class that plainly exists in the
+# source - a genuinely baffling symptom. Force a clean rebuild.
+echo "  rebuilding to clear mutated class output..."
+mvn -B -q clean install -DskipTests -Djacoco.skip=true >/dev/null 2>&1 \
+    || { echo "  ERROR: rebuild after restore failed" >&2; exit 1; }
 trap - EXIT INT TERM
 purge_icloud_duplicates
 if mvn -B -q -Djacoco.skip=true -pl platform-common test >/dev/null 2>&1; then

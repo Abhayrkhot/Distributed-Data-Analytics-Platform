@@ -85,6 +85,12 @@ mutate_stream() {
     MUTATE_MODULE=""
 }
 
+# Guarantees that live in platform-bench.
+mutate_bench() {
+    MUTATE_MODULE=platform-bench mutate "$@"
+    MUTATE_MODULE=""
+}
+
 # mutate <guarantee> <file> <sed-script> <test-name-that-must-fail>
 mutate() {
     local guarantee="$1" file="$2" script="$3" expect="$4"
@@ -407,6 +413,42 @@ mutate_ingest_it "bronze job: register schema after publishing" "$BRONZEJOB" \
 mutate_ingest_it "bronze job: record lineage even when nothing published" "$BRONZEJOB" \
     's|            if (outcome.published()) {|            if (true) {|' \
     "ineage\|noPublicationNoLineage"
+
+echo
+echo "Benchmark honesty:"
+echo
+
+STATS=platform-bench/src/main/java/com/analyticsplatform/bench/report/BenchmarkStatistics.java
+REPORT=platform-bench/src/main/java/com/analyticsplatform/bench/report/BenchmarkReport.java
+OBSERVATION=platform-bench/src/main/java/com/analyticsplatform/bench/run/BenchmarkObservation.java
+BENCHCFG=platform-bench/src/main/java/com/analyticsplatform/bench/config/BenchmarkConfig.java
+
+# Reporting a headline from configs that consumed different data is the single most
+# seductive false result: it always looks like a win.
+mutate_bench "bench: report a headline despite differing inputs" "$REPORT" \
+    's|        if (!isValid()) {|        if (false) {|' \
+    "differingInput\|invalid\|Refusal"
+
+# Counting warm-ups measures JIT and class loading, not the workload.
+mutate_bench "bench: include warm-up runs in the statistics" "$OBSERVATION" \
+    's|        return !warmup \&\& correctnessPassed;|        return true;|' \
+    "warmup\|Warmup\|excluded"
+
+# A zero duration is a broken measurement; averaging it in understates every config
+# that contains one.
+mutate_bench "bench: accept zero-duration measurements" "$STATS" \
+    's|            if (duration <= 0) {|            if (false) {|' \
+    "nonPositive\|broken measurement"
+
+# Mean rather than median lets one disturbed Docker run move the headline figure.
+mutate_bench "bench: compute improvement from means" "$STATS" \
+    's|        return (baseline.medianMillis - medianMillis) / baseline.medianMillis;|        return (baseline.meanMillis - meanMillis) / baseline.meanMillis;|' \
+    "outlier\|Outlier\|median"
+
+# Compression in an execution config makes the resulting percentage unattributable.
+mutate_bench "bench: allow compression in an execution config" "$BENCHCFG" \
+    's|                if (key.contains("compression") \|\| key.contains("codec")) {|                if (false) {|' \
+    "compression\|Experiment B"
 
 echo
 printf '  %d guarantee(s) verified, %d insufficient\n\n' "$PASS" "$FAIL"

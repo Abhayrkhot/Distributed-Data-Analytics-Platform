@@ -1,0 +1,109 @@
+package com.analyticsplatform.bench.run;
+
+import static org.apache.spark.sql.functions.avg;
+import static org.apache.spark.sql.functions.broadcast;
+import static org.apache.spark.sql.functions.coalesce;
+import static org.apache.spark.sql.functions.col;
+import static org.apache.spark.sql.functions.count;
+import static org.apache.spark.sql.functions.lit;
+import static org.apache.spark.sql.functions.month;
+import static org.apache.spark.sql.functions.sum;
+import static org.apache.spark.sql.functions.year;
+
+import com.analyticsplatform.bench.config.BenchmarkConfig;
+import java.util.List;
+import org.apache.spark.sql.Dataset;
+import org.apache.spark.sql.Row;
+
+/**
+ * The workload under measurement: silver to a borough-level aggregate.
+ *
+ * <p>Chosen because it exercises everything the tuning targets — a shuffle, a dimension join, and a
+ * scan whose width and partition count the configuration can change. A workload that only scanned
+ * would make partition tuning look irrelevant; one that only shuffled would make pruning look so.
+ *
+ * <h2>The configuration changes the plan, not the answer</h2>
+ *
+ * <p>Every variant must produce identical output. Pruning reads fewer columns and fewer partitions
+ * but computes the same aggregate; the broadcast hint changes the join strategy, not its result. If
+ * a variant ever produced something different, the correctness gate rejects the whole comparison —
+ * which is the only reason it is safe to let the configuration influence the plan at all.
+ */
+public final class GoldWorkload {
+
+    /** Columns the aggregate actually needs. Everything else is dead weight. */
+    private static final List<String> REQUIRED_COLUMNS = List.of(
+            "pickup_ts", "pickup_location_id", "pickup_borough",
+            "fare_amount", "total_amount", "trip_distance_mi", "trip_duration_min");
+
+    private GoldWorkload() {
+    }
+
+    /**
+     * Builds the aggregate under a given configuration.
+     *
+     * @param silver the trip fact
+     * @param zones  the zone dimension, small enough to broadcast
+     */
+    public static Dataset<Row> aggregate(
+            Dataset<Row> silver, Dataset<Row> zones, BenchmarkConfig config) {
+
+        Dataset<Row> source = silver;
+
+        // Partition pruning: restrict to a month before anything else, so the scan can skip files
+        // rather than reading them and discarding rows.
+        if (config.partitionPruning()) {
+            source = source.filter(year(col("pickup_ts")).equalTo(2024)
+                    .or(year(col("pickup_ts")).equalTo(2025)));
+        }
+
+        // Column pruning: project early. Without it the scan carries every column through the
+        // shuffle, which is the cost the tuning is meant to remove.
+        if (config.columnPruning()) {
+            source = source.select(REQUIRED_COLUMNS.stream()
+                    .map(org.apache.spark.sql.functions::col)
+                    .toArray(org.apache.spark.sql.Column[]::new));
+        }
+
+        Dataset<Row> dimension = zones.select(
+                col("LocationID").alias("__zone_id"),
+                col("service_zone").alias("__service_zone"));
+
+        // Spark auto-broadcasts small tables, so the hint may be a no-op. The ablation and the
+        // EXPLAIN capture are what determine whether it actually changed anything - the hint alone
+        // is not evidence.
+        Dataset<Row> joined = config.broadcastHint()
+                ? source.join(broadcast(dimension),
+                        col("pickup_location_id").equalTo(col("__zone_id")), "left")
+                : source.join(dimension,
+                        col("pickup_location_id").equalTo(col("__zone_id")), "left");
+
+        return joined
+                .withColumn("service_zone", coalesce(col("__service_zone"), lit("Unknown")))
+                .groupBy(col("pickup_borough"), col("service_zone"),
+                        year(col("pickup_ts")).alias("pickup_year"),
+                        month(col("pickup_ts")).alias("pickup_month"))
+                .agg(
+                        count(lit(1)).alias("trip_count"),
+                        sum("total_amount").alias("total_revenue"),
+                        avg("fare_amount").alias("avg_fare"),
+                        avg("trip_distance_mi").alias("avg_distance_mi"),
+                        avg("trip_duration_min").alias("avg_duration_min"));
+    }
+
+    /** The physical plan, for evidence that a claimed optimization actually engaged. */
+    public static String explain(Dataset<Row> plan) {
+        return plan.queryExecution().executedPlan().toString();
+    }
+
+    /**
+     * Whether a plan uses a broadcast join.
+     *
+     * <p>Read from the plan rather than assumed from the hint. Spark broadcasts small tables on its
+     * own, so a hint can be entirely redundant — and attributing an improvement to a no-op is
+     * exactly the kind of claim this project is trying not to make.
+     */
+    public static boolean usesBroadcastJoin(Dataset<Row> plan) {
+        return explain(plan).contains("BroadcastHashJoin");
+    }
+}

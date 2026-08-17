@@ -39,11 +39,6 @@
       <groupId>com.clickhouse.spark</groupId>
       <artifactId>clickhouse-spark-runtime-3.5_${scala.binary.version}</artifactId>
     </dependency>
-    <dependency>
-      <groupId>com.clickhouse</groupId>
-      <artifactId>clickhouse-jdbc</artifactId>
-      <classifier>all</classifier>
-    </dependency>
   </dependencies>
 
   <build>

@@ -25,6 +25,14 @@
       <type>test-jar</type>
       <scope>test</scope>
     </dependency>
+    <!-- The recovery test builds its event set from real silver output, so the stream
+         carries realistic event-time spread rather than uniform synthetic events. -->
+    <dependency>
+      <groupId>com.analyticsplatform</groupId>
+      <artifactId>platform-transform</artifactId>
+      <version>${project.version}</version>
+      <scope>test</scope>
+    </dependency>
     <dependency>
       <groupId>org.apache.spark</groupId>
       <artifactId>spark-sql_${scala.binary.version}</artifactId>

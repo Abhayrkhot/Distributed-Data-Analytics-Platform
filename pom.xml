@@ -35,7 +35,11 @@
 
     <postgresql.version>42.7.7</postgresql.version>
     <clickhouse.spark.version>0.10.0</clickhouse.spark.version>
-    <clickhouse.jdbc.version>0.9.0</clickhouse.jdbc.version>
+    <!-- clickhouse-jdbc is deliberately NOT a dependency. Its SQL lexer is ANTLR-4.13
+         generated and Spark 3.5's parsers are 4.9.3 generated; the two cannot share a
+         JVM, and the -all jar bundles ANTLR un-relocated so no exclusion can fix it.
+         ClickHouse is reached through the native Spark connector for writes and its HTTP
+         interface for anything needing FINAL. See ClickHouseProbe for the full account. -->
     <kafka.clients.version>3.9.1</kafka.clients.version>
 
     <!-- JUnit 5.14.x, not 6.x: jqwik 1.10.1 is built against JUnit Platform
@@ -102,25 +106,6 @@
         <groupId>com.clickhouse.spark</groupId>
         <artifactId>clickhouse-spark-runtime-3.5_${scala.binary.version}</artifactId>
         <version>${clickhouse.spark.version}</version>
-      </dependency>
-      <dependency>
-        <groupId>com.clickhouse</groupId>
-        <artifactId>clickhouse-jdbc</artifactId>
-        <version>${clickhouse.jdbc.version}</version>
-        <classifier>all</classifier>
-        <exclusions>
-          <!-- clickhouse-jdbc 0.9.0 pulls antlr4-runtime 4.13.2, which wins Maven
-               mediation over Spark's provided 4.9.3. Spark's SQL parsers are
-               GENERATED with 4.9.3, and 4.13 cannot deserialize their ATN, so every
-               spark.sql() and functions.expr() call dies with
-               "Could not deserialize ATN with version 3 (expected 4)".
-               This is not test-only: the same clash breaks jobs on the cluster if the
-               newer runtime lands first on the classpath. -->
-          <exclusion>
-            <groupId>org.antlr</groupId>
-            <artifactId>antlr4-runtime</artifactId>
-          </exclusion>
-        </exclusions>
       </dependency>
 
       <dependency>

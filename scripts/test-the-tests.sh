@@ -168,6 +168,19 @@ mutate "run context: assume success when nothing was claimed" "$RUNCTX" \
     's|        RunOutcome outcome = claimed != null ? claimed : RunOutcome.failed(|        RunOutcome outcome = claimed != null ? claimed : RunOutcome.success(0, 0, 0); if (false) outcome = RunOutcome.failed(|' \
     "Incomplete\|markSuccess\|NeitherPath"
 
+# The golden dataset is only evidence if editing it is detected. A fixture change
+# that silently invalidated every downstream expectation would otherwise surface
+# much later, as a silver test failing for reasons unrelated to silver.
+mutate "golden: silently change silver revenue" \
+    "tests/golden/expected_silver.csv" \
+    's|,28.30,0.2000,|,29.30,0.2000,|' \
+    "reconcile\|525.10\|revenue"
+
+mutate "fixtures: remove the duplicate row" \
+    "tests/fixtures/yellow_tripdata_2024-01.csv" \
+    '4{/2024-01-15 08:30:00/d;}' \
+    "duplicate\|reconcile\|rowCounts"
+
 echo
 echo "Guarantees that only exist against a real database:"
 echo

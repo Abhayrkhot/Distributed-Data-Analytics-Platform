@@ -1,0 +1,4 @@
+VendorID,tpep_pickup_datetime,tpep_dropoff_datetime,passenger_count,trip_distance,RatecodeID,store_and_fwd_flag,PULocationID,DOLocationID,payment_type,fare_amount,extra,mta_tax,tip_amount,tolls_amount,improvement_surcharge,total_amount,congestion_surcharge,Airport_fee,cbd_congestion_fee
+1,2025-01-05 08:00:00,2025-01-05 08:25:00,1,4.50,1,N,161,236,1,24.00,0.00,0.50,4.80,0.00,1.00,32.05,0.75,0.00,0.75
+2,2025-01-05 09:00:00,2025-01-05 09:15:00,2,2.00,1,N,142,161,2,12.00,0.50,0.50,0.00,0.00,1.00,16.25,1.50,0.00,0.75
+1,2025-01-06 10:00:00,2025-01-06 10:40:00,3,9.00,1,N,236,33,1,38.00,0.00,0.50,7.60,0.00,1.00,49.10,2.00,0.00,0.00

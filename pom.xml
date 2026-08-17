@@ -1,0 +1,312 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>com.analyticsplatform</groupId>
+  <artifactId>analytics-platform</artifactId>
+  <version>1.0.0-SNAPSHOT</version>
+  <packaging>pom</packaging>
+  <name>Distributed Data Analytics Platform</name>
+
+  <modules>
+    <module>platform-common</module>
+    <module>platform-ingest</module>
+    <module>platform-transform</module>
+    <module>platform-stream</module>
+    <module>platform-bench</module>
+  </modules>
+
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+
+    <!-- Runtime stack. Scala 2.12 because apache/spark:3.5.9 bundles
+         scala-library-2.12.18; a _2.13 artifact would not link. -->
+    <spark.version>3.5.9</spark.version>
+    <scala.binary.version>2.12</scala.binary.version>
+
+    <!-- Pinned to what Spark actually ships, NOT to the newest release.
+         Spark puts its own jackson/slf4j on the classpath first, so a newer
+         version here compiles fine and then breaks at runtime on the cluster. -->
+    <jackson.version>2.15.2</jackson.version>
+    <slf4j.version>2.0.7</slf4j.version>
+
+    <postgresql.version>42.7.7</postgresql.version>
+    <clickhouse.spark.version>0.10.0</clickhouse.spark.version>
+    <clickhouse.jdbc.version>0.9.0</clickhouse.jdbc.version>
+    <kafka.clients.version>3.9.1</kafka.clients.version>
+
+    <!-- JUnit 5.14.x, not 6.x: jqwik 1.10.1 is built against JUnit Platform
+         1.14.4, and Platform 6 would not discover its engine. -->
+    <junit.version>5.14.4</junit.version>
+    <jqwik.version>1.10.1</jqwik.version>
+    <assertj.version>3.27.7</assertj.version>
+
+    <compiler.plugin.version>3.14.1</compiler.plugin.version>
+    <surefire.plugin.version>3.5.6</surefire.plugin.version>
+    <shade.plugin.version>3.6.2</shade.plugin.version>
+    <jacoco.version>0.8.15</jacoco.version>
+    <pitest.version>1.25.9</pitest.version>
+    <pitest.junit5.version>1.2.3</pitest.junit5.version>
+
+    <!-- Spark on Java 17 needs the JDK internals it reflects into to be opened,
+         otherwise every local[2] component test dies in Platform.<clinit>. -->
+    <spark.test.jvm.args>
+      -XX:+IgnoreUnrecognizedVMOptions
+      --add-opens=java.base/java.lang=ALL-UNNAMED
+      --add-opens=java.base/java.lang.invoke=ALL-UNNAMED
+      --add-opens=java.base/java.lang.reflect=ALL-UNNAMED
+      --add-opens=java.base/java.io=ALL-UNNAMED
+      --add-opens=java.base/java.net=ALL-UNNAMED
+      --add-opens=java.base/java.nio=ALL-UNNAMED
+      --add-opens=java.base/java.util=ALL-UNNAMED
+      --add-opens=java.base/java.util.concurrent=ALL-UNNAMED
+      --add-opens=java.base/java.util.concurrent.atomic=ALL-UNNAMED
+      --add-opens=java.base/sun.nio.ch=ALL-UNNAMED
+      --add-opens=java.base/sun.nio.cs=ALL-UNNAMED
+      --add-opens=java.base/sun.security.action=ALL-UNNAMED
+      --add-opens=java.base/sun.util.calendar=ALL-UNNAMED
+      -Djdk.reflect.useDirectMethodHandle=false
+      -Dio.netty.tryReflectionSetAccessible=true
+    </spark.test.jvm.args>
+
+    <!-- Coverage gates (§20). Enforced at `verify`, not `test`, so the
+         development loop stays fast. -->
+    <coverage.line.minimum>0.85</coverage.line.minimum>
+    <coverage.branch.minimum>0.80</coverage.branch.minimum>
+  </properties>
+
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.apache.spark</groupId>
+        <artifactId>spark-core_${scala.binary.version}</artifactId>
+        <version>${spark.version}</version>
+        <scope>provided</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.spark</groupId>
+        <artifactId>spark-sql_${scala.binary.version}</artifactId>
+        <version>${spark.version}</version>
+        <scope>provided</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.spark</groupId>
+        <artifactId>spark-sql-kafka-0-10_${scala.binary.version}</artifactId>
+        <version>${spark.version}</version>
+      </dependency>
+
+      <dependency>
+        <groupId>com.clickhouse.spark</groupId>
+        <artifactId>clickhouse-spark-runtime-3.5_${scala.binary.version}</artifactId>
+        <version>${clickhouse.spark.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.clickhouse</groupId>
+        <artifactId>clickhouse-jdbc</artifactId>
+        <version>${clickhouse.jdbc.version}</version>
+        <classifier>all</classifier>
+      </dependency>
+
+      <dependency>
+        <groupId>org.postgresql</groupId>
+        <artifactId>postgresql</artifactId>
+        <version>${postgresql.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.kafka</groupId>
+        <artifactId>kafka-clients</artifactId>
+        <version>${kafka.clients.version}</version>
+      </dependency>
+
+      <dependency>
+        <groupId>com.fasterxml.jackson.core</groupId>
+        <artifactId>jackson-databind</artifactId>
+        <version>${jackson.version}</version>
+        <scope>provided</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.slf4j</groupId>
+        <artifactId>slf4j-api</artifactId>
+        <version>${slf4j.version}</version>
+        <scope>provided</scope>
+      </dependency>
+
+      <!-- Internal -->
+      <dependency>
+        <groupId>com.analyticsplatform</groupId>
+        <artifactId>platform-common</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.analyticsplatform</groupId>
+        <artifactId>platform-common</artifactId>
+        <version>${project.version}</version>
+        <type>test-jar</type>
+        <scope>test</scope>
+      </dependency>
+
+      <!-- Test -->
+      <dependency>
+        <groupId>org.junit</groupId>
+        <artifactId>junit-bom</artifactId>
+        <version>${junit.version}</version>
+        <type>pom</type>
+        <scope>import</scope>
+      </dependency>
+      <dependency>
+        <groupId>net.jqwik</groupId>
+        <artifactId>jqwik</artifactId>
+        <version>${jqwik.version}</version>
+        <scope>test</scope>
+      </dependency>
+      <dependency>
+        <groupId>org.assertj</groupId>
+        <artifactId>assertj-core</artifactId>
+        <version>${assertj.version}</version>
+        <scope>test</scope>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>net.jqwik</groupId>
+      <artifactId>jqwik</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.assertj</groupId>
+      <artifactId>assertj-core</artifactId>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <pluginManagement>
+      <plugins>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-shade-plugin</artifactId>
+          <version>${shade.plugin.version}</version>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>${compiler.plugin.version}</version>
+        <configuration>
+          <compilerArgs>
+            <arg>-Xlint:all,-serial,-processing</arg>
+          </compilerArgs>
+        </configuration>
+      </plugin>
+
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>${surefire.plugin.version}</version>
+        <configuration>
+          <!-- @{argLine} (not ${argLine}) so JaCoCo's agent, injected late, is
+               preserved rather than clobbered. -->
+          <argLine>@{argLine} ${spark.test.jvm.args}</argLine>
+          <!-- §48: a flaky test is a defect. Deliberately no rerunFailingTestsCount:
+               green-by-retry is exactly what the zero-flaky policy forbids. -->
+          <trimStackTrace>false</trimStackTrace>
+          <includes>
+            <include>**/*Test.java</include>
+            <include>**/*Properties.java</include>
+          </includes>
+        </configuration>
+      </plugin>
+
+      <plugin>
+        <groupId>org.jacoco</groupId>
+        <artifactId>jacoco-maven-plugin</artifactId>
+        <version>${jacoco.version}</version>
+        <executions>
+          <execution>
+            <id>prepare-agent</id>
+            <goals><goal>prepare-agent</goal></goals>
+          </execution>
+          <execution>
+            <id>report</id>
+            <phase>test</phase>
+            <goals><goal>report</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+
+      <plugin>
+        <groupId>org.pitest</groupId>
+        <artifactId>pitest-maven</artifactId>
+        <version>${pitest.version}</version>
+        <dependencies>
+          <dependency>
+            <groupId>org.pitest</groupId>
+            <artifactId>pitest-junit5-plugin</artifactId>
+            <version>${pitest.junit5.version}</version>
+          </dependency>
+        </dependencies>
+        <configuration>
+          <jvmArgs>
+            <jvmArg>-XX:+IgnoreUnrecognizedVMOptions</jvmArg>
+            <jvmArg>--add-opens=java.base/java.lang=ALL-UNNAMED</jvmArg>
+            <jvmArg>--add-opens=java.base/java.util=ALL-UNNAMED</jvmArg>
+          </jvmArgs>
+          <timestampedReports>false</timestampedReports>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+
+  <profiles>
+    <!-- `mvn verify -Pgates` enforces the coverage thresholds. Kept off the
+         default lifecycle so partial work in progress is not blocked. -->
+    <profile>
+      <id>gates</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.jacoco</groupId>
+            <artifactId>jacoco-maven-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>check-coverage</id>
+                <phase>verify</phase>
+                <goals><goal>check</goal></goals>
+                <configuration>
+                  <rules>
+                    <rule>
+                      <element>BUNDLE</element>
+                      <limits>
+                        <limit>
+                          <counter>LINE</counter>
+                          <value>COVEREDRATIO</value>
+                          <minimum>${coverage.line.minimum}</minimum>
+                        </limit>
+                        <limit>
+                          <counter>BRANCH</counter>
+                          <value>COVEREDRATIO</value>
+                          <minimum>${coverage.branch.minimum}</minimum>
+                        </limit>
+                      </limits>
+                    </rule>
+                  </rules>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
+</project>

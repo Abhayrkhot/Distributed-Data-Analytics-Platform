@@ -1,0 +1,232 @@
+# Distributed Data Analytics Platform - local cluster
+#
+# Services: Spark standalone (1 master + 2 workers + history server),
+#           Postgres (control plane), ClickHouse (analytical marts),
+#           Kafka in KRaft mode (no ZooKeeper), Kafka UI.
+#
+# All images are arm64-native, so this runs without emulation on Apple Silicon.
+#
+#   docker compose -f docker/docker-compose.yml up -d
+#
+# Memory budget is sized for the *Docker VM*, not the host. This machine's VM is
+# 7.65 GB, so the core stack below totals ~6.75 GB and leaves ~900 MB of headroom.
+#
+# Raising Docker Desktop to 12 GB (Settings -> Resources -> Memory) is worth doing:
+# afterwards bump each worker to `--memory 2500M` / limit 3G for noticeably faster
+# runs on the full multi-month dataset. Everything works as-is without that change.
+#
+# Opt-in extras (kept out of the default budget):
+#   docker compose --profile ui      up -d   # Kafka UI on :8090
+#   docker compose --profile history up -d   # Spark history server on :18080
+
+name: analytics-platform
+
+x-spark-common: &spark-common
+  # The plain `apache/spark:3.5.9` tag ships Java 11. We build with JDK 17, and
+  # Java 17 bytecode (major 61) will not load on a Java 11 JVM (max 55), so the
+  # executors must run 17 too. This variant is arm64-native like the rest.
+  image: apache/spark:3.5.9-scala2.12-java17-ubuntu
+  user: root
+  environment: &spark-env
+    SPARK_NO_DAEMONIZE: "true"
+    # Event logs feed the history server and the Phase 8 benchmark harness.
+    SPARK_MASTER_URL: spark://spark-master:7077
+  volumes:
+    - ../data:/data
+    - ../target-jars:/opt/jars
+    - ../conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+  networks: [platform]
+
+services:
+  # ---------------------------------------------------------------- Spark ----
+  spark-master:
+    <<: *spark-common
+    container_name: ap-spark-master
+    command: >
+      /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+      --host spark-master --port 7077 --webui-port 8080
+    ports:
+      - "8080:8080"   # master web UI
+      - "7077:7077"   # cluster submit endpoint
+      - "4040:4040"   # driver UI when submitting in client mode from this container
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080 >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    deploy:
+      resources:
+        limits: {memory: 1280M}
+
+  spark-worker-1:
+    <<: *spark-common
+    container_name: ap-spark-worker-1
+    command: >
+      /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker
+      spark://spark-master:7077 --cores 3 --memory 1000M --webui-port 8081
+    ports: ["8081:8081"]
+    depends_on:
+      spark-master: {condition: service_healthy}
+    deploy:
+      resources:
+        # Must exceed the advertised 1000M by executor overhead + the JVM itself.
+        limits: {memory: 1536M}
+
+  spark-worker-2:
+    <<: *spark-common
+    container_name: ap-spark-worker-2
+    command: >
+      /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker
+      spark://spark-master:7077 --cores 3 --memory 1000M --webui-port 8082
+    ports: ["8082:8082"]
+    depends_on:
+      spark-master: {condition: service_healthy}
+    deploy:
+      resources:
+        limits: {memory: 1536M}
+
+  # Reads the event logs the jobs emit; this is where Phase 8 reads real
+  # shuffle/spill/task-time numbers from rather than guessing.
+  spark-history:
+    <<: *spark-common
+    container_name: ap-spark-history
+    command: >
+      /opt/spark/bin/spark-class org.apache.spark.deploy.history.HistoryServer
+    environment:
+      <<: *spark-env
+      SPARK_HISTORY_OPTS: "-Dspark.history.fs.logDirectory=file:/data/spark-events -Dspark.history.ui.port=18080"
+    ports: ["18080:18080"]
+    depends_on:
+      spark-master: {condition: service_healthy}
+    deploy:
+      resources:
+        limits: {memory: 448M}
+    profiles: [history]   # opt-in; jobs still write event logs without it
+
+  # ------------------------------------------------------ Control plane ------
+  postgres:
+    image: postgres:17
+    container_name: ap-postgres
+    environment:
+      # No defaults on purpose: an absent value must abort the run rather than
+      # quietly fall back to a well-known password.
+      POSTGRES_DB: ${POSTGRES_DB:?not set - run ./scripts/init-secrets.sh}
+      POSTGRES_USER: ${POSTGRES_USER:?not set - run ./scripts/init-secrets.sh}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?not set - run ./scripts/init-secrets.sh}
+      # Deterministic collation so ORDER BY in tests is stable across machines.
+      #
+      # auth-local / auth-host override the image's default pg_hba.conf, which
+      # trusts every local-socket and loopback connection: inside the container
+      # no password is checked at all, so anything running there gets
+      # passwordless superuser access. scram-sha-256 everywhere removes that.
+      POSTGRES_INITDB_ARGS: >-
+        --locale=C --encoding=UTF8
+        --auth-local=scram-sha-256 --auth-host=scram-sha-256
+      POSTGRES_HOST_AUTH_METHOD: scram-sha-256
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # $$ escapes compose interpolation so the container's own env is read.
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [platform]
+    deploy:
+      resources:
+        limits: {memory: 384M}
+
+  # -------------------------------------------------- Analytical store ------
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.8
+    container_name: ap-clickhouse
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:?not set - run ./scripts/init-secrets.sh}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:?not set - run ./scripts/init-secrets.sh}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?not set - run ./scripts/init-secrets.sh}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ports:
+      - "8123:8123"   # HTTP  (used by the JDBC driver)
+      - "9000:9000"   # native (used by the Spark connector)
+    volumes:
+      - chdata:/var/lib/clickhouse
+      - ./clickhouse/init:/docker-entrypoint-initdb.d:ro
+    ulimits:
+      nofile: {soft: 262144, hard: 262144}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8123/ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    networks: [platform]
+    deploy:
+      resources:
+        limits: {memory: 1280M}
+
+  # ------------------------------------------------------------- Kafka ------
+  # KRaft mode: this is a combined broker+controller, no ZooKeeper anywhere.
+  kafka:
+    image: apache/kafka:4.1.0
+    container_name: ap-kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,PLAINTEXT_HOST://:29092
+      # Two advertised listeners: in-network jobs use kafka:9092, host tools use localhost:29092.
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 6
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      CLUSTER_ID: 5L6g3nShT-eMCtK--X86sw
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    volumes:
+      - kafkadata:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 25s
+    networks: [platform]
+    deploy:
+      resources:
+        limits: {memory: 896M}
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: ap-kafka-ui
+    environment:
+      KAFKA_CLUSTERS_0_NAME: analytics-platform
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+      DYNAMIC_CONFIG_ENABLED: "true"
+    ports: ["8090:8080"]
+    depends_on:
+      kafka: {condition: service_healthy}
+    networks: [platform]
+    deploy:
+      resources:
+        limits: {memory: 512M}
+    profiles: [ui]   # opt-in: `docker compose --profile ui up -d`
+
+networks:
+  platform:
+    name: analytics-platform-net
+
+volumes:
+  pgdata:
+  chdata:
+  kafkadata:

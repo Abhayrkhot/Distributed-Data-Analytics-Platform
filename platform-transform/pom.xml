@@ -25,6 +25,12 @@
       <type>test-jar</type>
       <scope>test</scope>
     </dependency>
+    <!-- Silver consumes bronze, so it needs the normalizer that produces it. -->
+    <dependency>
+      <groupId>com.analyticsplatform</groupId>
+      <artifactId>platform-ingest</artifactId>
+      <version>${project.version}</version>
+    </dependency>
     <dependency>
       <groupId>org.apache.spark</groupId>
       <artifactId>spark-sql_${scala.binary.version}</artifactId>

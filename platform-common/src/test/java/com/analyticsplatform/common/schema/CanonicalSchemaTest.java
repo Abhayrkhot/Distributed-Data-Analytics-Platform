@@ -101,6 +101,28 @@ class CanonicalSchemaTest {
                     .isNotEqualTo(CanonicalSchema.hash(of(f("v", type("decimal(10,4)")))));
         }
 
+        /** Spark 3.4+ types the pipeline may encounter but does not yet write. */
+        @Test
+        @DisplayName("timestamp_ntz canonicalizes distinctly from timestamp")
+        void timestampWithoutTimezoneIsDistinct() {
+            assertThat(CanonicalSchema.canonicalType(DataTypes.TimestampNTZType))
+                    .isEqualTo("timestamp_ntz");
+            assertThat(CanonicalSchema.canonicalType(DataTypes.TimestampNTZType))
+                    .isNotEqualTo(CanonicalSchema.canonicalType(DataTypes.TimestampType));
+        }
+
+        /**
+         * An unrecognized type falls back to Spark's own name rather than throwing. A schema
+         * carrying an exotic type should still hash stably; refusing to canonicalize it would
+         * block ingestion over a type the pipeline never actually reads.
+         */
+        @Test
+        @DisplayName("an unmapped type falls back to Spark's type name")
+        void unknownTypeFallsBackToSparkName() {
+            assertThat(CanonicalSchema.canonicalType(DataTypes.CalendarIntervalType))
+                    .isEqualTo(DataTypes.CalendarIntervalType.typeName());
+        }
+
         @Test
         @DisplayName("array and map carry their nullability flags")
         void collectionTypesIncludeNullability() {

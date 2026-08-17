@@ -99,6 +99,16 @@ for file in $FILES; do
             case "$hit" in
                 *'="$'*|*"='\$"*|*'=$'*) continue ;;
             esac
+            # A constant whose literal value is its own identifier is a config
+            # KEY, not a credential:
+            #     public static final String POSTGRES_PASSWORD = "POSTGRES_PASSWORD";
+            # Narrow and safe to skip: a real secret cannot equal the name of the
+            # constant holding it.
+            ident=$(printf '%s' "$hit" | sed -nE 's/.*[[:space:]]([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=[[:space:]]*".*/\1/p')
+            lit=$(printf '%s' "$hit" | sed -nE 's/.*=[[:space:]]*"([^"]*)".*/\1/p')
+            if [ -n "$ident" ] && [ "$ident" = "$lit" ]; then
+                continue
+            fi
             report "$file: $(echo "$hit" | cut -c1-110)"
         # -i because `password = "..."` leaks just as much as `PASSWORD=...`;
         # a case-sensitive scan misses the lowercase form entirely.

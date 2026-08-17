@@ -124,5 +124,15 @@ ch() {
 }
 
 # JDBC URLs for Spark jobs. Built here so no job hardcodes a credential.
+# Two forms of each URL. Spark jobs run inside the compose network and resolve
+# the service names; anything running on the host (integration tests, the
+# invariant checker) has to go through the published ports instead.
 export PG_JDBC_URL="jdbc:postgresql://postgres:5432/${POSTGRES_DB}"
 export CH_JDBC_URL="jdbc:clickhouse://clickhouse:8123/${CLICKHOUSE_DB}"
+export PG_JDBC_URL_LOCAL="jdbc:postgresql://localhost:5432/${POSTGRES_DB}"
+export CH_JDBC_URL_LOCAL="jdbc:clickhouse://localhost:8123/${CLICKHOUSE_DB}"
+
+# Non-secret defaults the platform config needs; jobs override as required.
+export KAFKA_BOOTSTRAP="${KAFKA_BOOTSTRAP:-$KAFKA_BOOTSTRAP_CLUSTER}"
+export DATA_ROOT="${DATA_ROOT:-$PROJECT_ROOT/data/warehouse}"
+export STAGING_ROOT="${STAGING_ROOT:-$PROJECT_ROOT/data/staging}"

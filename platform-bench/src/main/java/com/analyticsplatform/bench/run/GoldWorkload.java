@@ -12,6 +12,7 @@ import static org.apache.spark.sql.functions.year;
 
 import com.analyticsplatform.bench.config.BenchmarkConfig;
 import java.util.List;
+import org.apache.spark.sql.Column;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 
@@ -50,11 +51,24 @@ public final class GoldWorkload {
 
         Dataset<Row> source = silver;
 
-        // Partition pruning: restrict to a month before anything else, so the scan can skip files
-        // rather than reading them and discarding rows.
+        // The scope filter is part of the WORKLOAD, applied to every configuration. It is not the
+        // optimization.
+        //
+        // An earlier revision applied it only when partitionPruning was on, and the correctness
+        // gate rejected the whole comparison on real data: the January 2024 file contains rows
+        // with pickup years 2002, 2009 and 2023 (15 in 2.9M, corrupt meter timestamps), so the
+        // "optimized" config was faster partly because it silently processed less data and
+        // produced a DIFFERENT answer. That is a filter mislabelled as an optimization - genuine
+        // partition pruning skips files that cannot match and never changes the result.
+        //
+        // What the flag now controls is WHERE the filter runs, which changes the plan and not the
+        // answer. Both branches below produce identical output; only the cost differs.
+        Column inScope = year(col("pickup_ts")).isin(2024, 2025);
+
         if (config.partitionPruning()) {
-            source = source.filter(year(col("pickup_ts")).equalTo(2024)
-                    .or(year(col("pickup_ts")).equalTo(2025)));
+            // Early: filter before the join, so the predicate reaches the scan and the join sees
+            // fewer rows.
+            source = source.filter(inScope);
         }
 
         // Column pruning: project early. Without it the scan carries every column through the
@@ -78,7 +92,11 @@ public final class GoldWorkload {
                 : source.join(dimension,
                         col("pickup_location_id").equalTo(col("__zone_id")), "left");
 
-        return joined
+        // Late: the unpruned configuration applies the same filter here, after the join has
+        // already carried every row through. Identical result, materially more work.
+        Dataset<Row> scoped = config.partitionPruning() ? joined : joined.filter(inScope);
+
+        return scoped
                 .withColumn("service_zone", coalesce(col("__service_zone"), lit("Unknown")))
                 .groupBy(col("pickup_borough"), col("service_zone"),
                         year(col("pickup_ts")).alias("pickup_year"),

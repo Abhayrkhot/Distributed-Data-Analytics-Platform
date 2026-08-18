@@ -451,6 +451,32 @@ mutate_bench "bench: allow compression in an execution config" "$BENCHCFG" \
     "compression\|Experiment B"
 
 echo
+echo "Filesystem safety:"
+echo
+
+CLEANER=platform-ingest/src/main/java/com/analyticsplatform/ingest/publish/StagingCleaner.java
+
+# Cleanup that can reach the warehouse turns a disk-space chore into data loss.
+mutate_ingest "cleaner: allow staging inside the data root" "$CLEANER" \
+    's|        if (staging.startsWith(data)) {|        if (false) {|' \
+    "stagingInsideData\|ConfigurationSafety\|published output"
+
+# NOTE: there is deliberately no mutation for requireInsideStagingRoot. Files.walk
+# does not follow symlinks by default, so that check is defence in depth rather than
+# the primary protection - removing it leaves every test green, and asserting a
+# guarantee no test can defend is exactly what this suite exists to prevent.
+
+# Deleting an in-use attempt pulls the working directory out from under a live job.
+mutate_ingest "cleaner: ignore active staging paths" "$CLEANER" \
+    's|            if (active.contains(candidate)) {|            if (false) {|' \
+    "active\|Active\|sibling"
+
+# A dry run that deletes is the opposite of a dry run.
+mutate_ingest "cleaner: dry run deletes anyway" "$CLEANER" \
+    's|            if (!dryRun) {|            if (true) {|' \
+    "dryRun\|DryRun\|deletes nothing"
+
+echo
 printf '  %d guarantee(s) verified, %d insufficient\n\n' "$PASS" "$FAIL"
 
 echo "restoring and confirming the suite is green again..."

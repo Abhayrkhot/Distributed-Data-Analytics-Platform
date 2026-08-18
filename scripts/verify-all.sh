@@ -104,6 +104,10 @@ stage "compile"                    compile_all
 stage "tests + coverage gates"     tests_and_coverage
 stage "SQL constraint rejection"   sql_constraints
 stage "test-the-tests (mutations)" mutation_suite
+# The global invariant checker asks a question no component-level suite can: is the
+# control plane internally consistent right now, across every table and every run?
+stage "global invariants" "./scripts/verify-platform.sh"
+
 stage "secret scan"                secrets
 stage "test isolation"             integration_leak_check
 

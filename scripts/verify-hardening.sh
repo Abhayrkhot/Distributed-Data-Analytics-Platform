@@ -134,7 +134,14 @@ stage "nondeterminism"          nondeterminism
 stage "property-expansion"      property_expansion
 stage "resource-pressure"       resource_pressure
 stage "mutation-expansion"      mutation_expansion
+# §46 Soak. Opt-in even within Tier 3: it takes minutes by construction, and the
+# signal is a trend rather than an assertion.
+soak() {
+    ./scripts/test-soak.sh --minutes "${SOAK_MINUTES:-3}"
+}
+
 stage "invariants-after-stress" invariants_after_stress
+stage "soak"                    soak
 
 echo
 if [ ${#FAILED[@]} -eq 0 ]; then

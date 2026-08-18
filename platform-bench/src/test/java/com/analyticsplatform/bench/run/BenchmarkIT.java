@@ -279,7 +279,9 @@ class BenchmarkIT {
 
             java.util.List<BenchmarkObservation> observations =
                     new BenchmarkHarness(spark, inputProfile)
-                            .run(configs, workload(), "naive_app", Plan.standard());
+                            .run(configs, workload(), "naive_app",
+                                    new Plan(1, Integer.parseInt(System.getenv()
+                                            .getOrDefault("BENCH_ITERATIONS", "5"))));
 
             new BenchmarkStore(connections).record(runId, observations,
                     BenchmarkStore.Environment.capture(spark, gitCommit()));

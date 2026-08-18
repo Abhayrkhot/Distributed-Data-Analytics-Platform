@@ -18,15 +18,18 @@ claim stops being true.**
 |---|---|
 | **Rows ingested** | 6,496,401 real NYC TLC records |
 | **Rows published to silver** | 6,262,830 (96.4% — 233,571 rejected with recorded reasons) |
-| **Measured speedup** | **14.4%** — median 1706ms → 1460ms |
+| **Measured speedup** | **17.8%** — median 2122ms → 1745ms, 15 iterations |
 | **Full-pipeline rerun** | every committed unit skipped in 6.4s |
 | **Tests** | 749 |
 | **Mutation guarantees** | 44 — each a guarantee deliberately broken to prove its test catches it |
 | **Global invariants** | 19, checked against the live control plane |
 
-The performance figure is **14.4%, not a round number**, measured over 6.3M rows with five
-iterations per configuration. A larger figure was available by comparing against a
-deliberately handicapped baseline, and was not used. Full report:
+The performance figure is **17.8%, not a round number**, measured over 6.3M rows with fifteen
+iterations per configuration against a named baseline. A larger figure was available by
+comparing against a deliberately handicapped baseline, and was not used.
+
+Run-to-run variation is real and worth stating: five-iteration samples of the same code ranged
+from 14% to 18%, which is why the published figure uses fifteen. Full report:
 [`docs/results/benchmark.md`](docs/results/benchmark.md).
 
 ---
@@ -110,9 +113,8 @@ against:
 
 | config | median | mean | sd | n |
 |---|---|---|---|---|
-| `naive_app` (baseline) | 1706ms | 1720ms | 82.0ms | 5 |
-| `spark_default` | 1682ms | 1739ms | 113.1ms | 5 |
-| `optimized` | **1460ms** | 1433ms | 48.8ms | 5 |
+| `naive_app` (baseline) | 2122ms | 2145ms | 228.3ms | 15 |
+| `optimized` | **1745ms** | 1785ms | 227.4ms | 15 |
 
 Improvement is computed from **medians**, because Docker on a laptop produces occasional
 outliers and one disturbed run should not move the figure.
@@ -198,7 +200,7 @@ kill.
 | **Restart-safe streaming** | `StreamRecoveryIT`, `ReplacingMergeTreeIT`, `StreamEpochIT` |
 | **Lineage / governance** | `LineageRecorderIT`, `E2EPipelineIT`, `verify-platform.sh` |
 | **Scale** | `RealDataAcceptanceIT` — 6.5M real rows end to end |
-| **Performance** | `BenchmarkIT` + correctness gate — measured 14.4% |
+| **Performance** | `BenchmarkIT` + correctness gate — measured 17.8% over 15 iterations |
 
 ---
 

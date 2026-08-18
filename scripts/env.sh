@@ -6,6 +6,27 @@
 # 17 also matches the JVM inside apache/spark:3.5.9-scala2.12-java17-ubuntu,
 # so compiled bytecode and the cluster runtime agree.
 
+# CI mode comes FIRST, before anything that assumes a developer laptop.
+#
+# The CI schema job needs psql and nothing else - no Java, no .env, no Docker. Having
+# the JDK check run first meant env.sh returned early on the Ubuntu runner and never
+# defined the pg helpers; because the calling script does not use `set -e`, the failed
+# source did not abort it and the suite reported 33 constraint failures that were really
+# one missing function. A failure that misreports its own cause is worse than a loud one.
+if [ "${CI_DIRECT_PSQL:-false}" = "true" ]; then
+    export POSTGRES_DB="${PGDATABASE:-platform}"
+    export POSTGRES_USER="${PGUSER:-platform}"
+    export POSTGRES_PASSWORD="${PGPASSWORD:-}"
+
+    pg()       { PGPASSWORD="$POSTGRES_PASSWORD" psql -h "${PGHOST:-localhost}" \
+                     -U "$POSTGRES_USER" -d "$POSTGRES_DB" "$@"; }
+    pg_stdin() { pg "$@"; }
+
+    PROJECT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+    export PROJECT_ROOT
+    return 0 2>/dev/null || exit 0
+fi
+
 JDK17_HOME="/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home"
 if [ ! -x "$JDK17_HOME/bin/javac" ]; then
     echo "error: JDK 17 not found at $JDK17_HOME" >&2
@@ -52,20 +73,6 @@ export ENV_FILE="$PROJECT_ROOT/.env"
 # Nothing here has a fallback value: a missing .env must stop the script rather
 # than silently connect with a guessable default.
 # ---------------------------------------------------------------------------
-# CI runs against a service container with no .env and no Docker exec available.
-# One code path, two connection modes, rather than a second copy of every script.
-if [ "${CI_DIRECT_PSQL:-false}" = "true" ]; then
-    export POSTGRES_DB="${PGDATABASE:-platform}"
-    export POSTGRES_USER="${PGUSER:-platform}"
-    export POSTGRES_PASSWORD="${PGPASSWORD:-}"
-
-    pg()       { PGPASSWORD="$POSTGRES_PASSWORD" psql -h "${PGHOST:-localhost}" \
-                     -U "$POSTGRES_USER" -d "$POSTGRES_DB" "$@"; }
-    pg_stdin() { pg "$@"; }
-    export -f pg pg_stdin 2>/dev/null || true
-    return 0 2>/dev/null || exit 0
-fi
-
 if [ ! -f "$ENV_FILE" ]; then
     echo "error: $ENV_FILE not found." >&2
     echo "       generate it with: ./scripts/init-secrets.sh" >&2

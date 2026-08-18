@@ -1,0 +1,150 @@
+name: CI
+
+# Runs the cheap, deterministic part of the verification suite on every push.
+#
+# Deliberately NOT the whole gate. The integration, streaming, benchmark and
+# real-data suites need a five-service Docker stack and a 106 MB download; forcing
+# every push through that would make CI slow enough that people start skipping it,
+# and a gate people route around protects nothing.
+#
+# What runs here is everything that needs no services: compile, unit tests,
+# component tests (Spark local), coverage gates, secret scanning, and the SQL
+# schema against a real Postgres. The expensive suites stay explicitly invoked --
+# see scripts/verify-all.sh.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  # A newer push supersedes an in-flight run on the same ref: no value in finishing
+  # a build for a commit nobody is waiting on.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build, unit and component tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # JDK 17 specifically. Spark 3.5 rejects newer JDKs, and the failure is an
+      # obscure reflection error rather than a clear version message.
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Compile
+        run: mvn -B -ntp clean compile
+
+      # Tests WITHOUT the coverage gates, deliberately.
+      #
+      # The gates measure the whole suite. CI runs only the service-free part, so the
+      # DB-backed classes -- JdbcControlPlane, LineageRecorder, SchemaRegistry -- are
+      # never exercised here and platform-common reports 63% instead of 89%. Enforcing
+      # a gate against a partial suite measures a fiction, and the tempting fix is to
+      # lower the threshold until it passes, which would entrench the wrong number
+      # permanently.
+      #
+      # The gates run in scripts/verify-all.sh, where the full suite runs in one
+      # invocation against the live stack. CI's job is to catch a broken build fast,
+      # not to restate a coverage figure it cannot legitimately compute.
+      - name: Unit and component tests
+        run: mvn -B -ntp test
+        env:
+          # Component tests run Spark locally; the default runner heap is not enough
+          # once a SparkSession is up.
+          MAVEN_OPTS: -Xmx3g
+
+      - name: Upload surefire reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: '**/target/surefire-reports/'
+          retention-days: 7
+
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The scanner examines tracked content; a shallow clone is enough, but the
+          # full history makes an accidental commit in an earlier revision visible too.
+          fetch-depth: 0
+
+      - name: Scan tracked content for credentials
+        run: ./scripts/secrets-scan.sh
+
+  schema:
+    name: SQL schema and constraints
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    # A real Postgres rather than a mock. The constraint tests assert that the
+    # DATABASE refuses impossible states -- checking that against anything other
+    # than Postgres would verify the mock, not the schema.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_DB: platform
+          POSTGRES_USER: platform
+          # Derived from the run id: ephemeral, unique per run, and not a literal, so
+          # there is no credential in the repository at all. The container is destroyed
+          # when the job ends.
+          POSTGRES_PASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}
+        options: >-
+          --health-cmd "pg_isready -U platform -d platform"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply the control-plane schema
+        env:
+          PGPASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          for f in docker/postgres/init/*.sql; do
+            echo "applying $f"
+            psql -h localhost -U platform -d platform -v ON_ERROR_STOP=1 -f "$f"
+          done
+
+      - name: Verify the seeded catalog and rules
+        env:
+          PGPASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          datasets=$(psql -h localhost -U platform -d platform -tAc \
+            "SELECT count(*) FROM control.dataset_catalog")
+          rules=$(psql -h localhost -U platform -d platform -tAc \
+            "SELECT count(*) FROM control.dq_rule")
+          echo "datasets=$datasets rules=$rules"
+          # The seed is load-bearing: a silver run with zero rules passes a gate that
+          # checked nothing, which is why the job now refuses that state.
+          [ "$datasets" -ge 12 ] || { echo "expected >=12 datasets"; exit 1; }
+          [ "$rules" -ge 19 ]    || { echo "expected >=19 dq rules"; exit 1; }
+
+      - name: Constraints reject impossible states
+        env:
+          PGHOST: localhost
+          PGUSER: platform
+          PGDATABASE: platform
+          PGPASSWORD: ${{ github.run_id }}-${{ github.run_attempt }}
+          CI_DIRECT_PSQL: 'true'
+        run: ./scripts/test-sql-constraints.sh

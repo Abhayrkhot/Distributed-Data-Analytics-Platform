@@ -98,6 +98,12 @@ for file in $FILES; do
             case "$hit" in
                 *'${'*|*'$('*) continue ;;
             esac
+            # A GitHub Actions expression is a reference resolved at runtime, not a
+            # literal -- the same class as an env-var passthrough. ${{ secrets.X }}
+            # and ${{ github.run_id }} contain no credential to leak.
+            case "$hit" in
+                *'${{'*) continue ;;
+            esac
             # Env-var passthrough like PGPASSWORD="$POSTGRES_PASSWORD".
             case "$hit" in
                 *'="$'*|*"='\$"*|*'=$'*) continue ;;

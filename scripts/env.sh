@@ -52,6 +52,20 @@ export ENV_FILE="$PROJECT_ROOT/.env"
 # Nothing here has a fallback value: a missing .env must stop the script rather
 # than silently connect with a guessable default.
 # ---------------------------------------------------------------------------
+# CI runs against a service container with no .env and no Docker exec available.
+# One code path, two connection modes, rather than a second copy of every script.
+if [ "${CI_DIRECT_PSQL:-false}" = "true" ]; then
+    export POSTGRES_DB="${PGDATABASE:-platform}"
+    export POSTGRES_USER="${PGUSER:-platform}"
+    export POSTGRES_PASSWORD="${PGPASSWORD:-}"
+
+    pg()       { PGPASSWORD="$POSTGRES_PASSWORD" psql -h "${PGHOST:-localhost}" \
+                     -U "$POSTGRES_USER" -d "$POSTGRES_DB" "$@"; }
+    pg_stdin() { pg "$@"; }
+    export -f pg pg_stdin 2>/dev/null || true
+    return 0 2>/dev/null || exit 0
+fi
+
 if [ ! -f "$ENV_FILE" ]; then
     echo "error: $ENV_FILE not found." >&2
     echo "       generate it with: ./scripts/init-secrets.sh" >&2

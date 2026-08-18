@@ -20,6 +20,16 @@ set -uo pipefail
 # shellcheck source=scripts/env.sh
 source "$(dirname "${BASH_SOURCE[0]}")/env.sh"
 
+# A failed source is silent without `set -e`, and every test then fails with
+# "pg_stdin: command not found" - 33 red lines describing one missing function.
+# Checking here turns that into a single accurate message.
+if ! declare -F pg_stdin >/dev/null 2>&1; then
+    echo "error: env.sh did not define the database helpers." >&2
+    echo "       Locally: check .env exists (./scripts/init-secrets.sh)." >&2
+    echo "       In CI:   set CI_DIRECT_PSQL=true and the PG* variables." >&2
+    exit 1
+fi
+
 psql_run() { pg_stdin -v ON_ERROR_STOP=1 -q; }
 
 PASS=0

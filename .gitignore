@@ -10,7 +10,6 @@ data/
 .vscode/
 .DS_Store
 dependency-reduced-pom.xml
-docs/results/benchmark.md
 !docs/results/.gitkeep
 .env
 .env.*

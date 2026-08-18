@@ -1,53 +1,72 @@
 # Distributed Data Analytics Platform
 
-A batch and streaming analytics platform over NYC TLC taxi data: Spark pipelines landing in
-ClickHouse for analytics and Postgres for governance metadata, with a Kafka streaming path.
+[![CI](https://github.com/Abhayrkhot/Distributed-Data-Analytics-Platform/actions/workflows/ci.yml/badge.svg)](https://github.com/Abhayrkhot/Distributed-Data-Analytics-Platform/actions/workflows/ci.yml)
 
-The organising principle is stated up front because it drove most of the design decisions:
+A batch and streaming analytics platform over NYC taxi data. Spark pipelines land in
+ClickHouse for analytics and Postgres for governance metadata, with a Kafka streaming path
+alongside.
 
-> **Every architectural claim corresponds to running code, every reliability claim has a failure
-> test, and every performance claim corresponds to a reproducible measurement.**
-
-Where a claim could not be backed, it was removed rather than softened. Those cases are listed in
-[What is *not* claimed](#what-is-not-claimed).
+It processes **6.5 million real rows**, and the thing it is actually built to demonstrate is
+not the pipeline — it is that **every claim it makes is backed by a test that fails when the
+claim stops being true.**
 
 ---
 
-## Quickstart
+## Results
 
-```bash
-./scripts/init-secrets.sh                              # generate .env (gitignored)
-docker compose --env-file .env -f docker/docker-compose.yml up -d
-./scripts/test.sh                                      # fast: unit + component
-./scripts/verify-all.sh                                # the full gate
-```
+| | |
+|---|---|
+| **Rows ingested** | 6,496,401 real NYC TLC records |
+| **Rows published to silver** | 6,262,830 (96.4% — 233,571 rejected with recorded reasons) |
+| **Measured speedup** | **14.4%** — median 1706ms → 1460ms |
+| **Full-pipeline rerun** | every committed unit skipped in 6.4s |
+| **Tests** | 749 |
+| **Mutation guarantees** | 44 — each a guarantee deliberately broken to prove its test catches it |
+| **Global invariants** | 19, checked against the live control plane |
 
-Requires **JDK 17** specifically. Homebrew's `mvn` defaults to a newer JDK that Spark 3.5 rejects;
-`scripts/env.sh` pins `JAVA_HOME` for you.
+The performance figure is **14.4%, not a round number**, measured over 6.3M rows with five
+iterations per configuration. A larger figure was available by comparing against a
+deliberately handicapped baseline, and was not used. Full report:
+[`docs/results/benchmark.md`](docs/results/benchmark.md).
 
 ---
 
 ## Architecture
 
 ```
- TLC parquet ─┐
- (yellow,     ├─► BRONZE ──► SILVER ──► GOLD ──► ClickHouse   (analytical marts)
-  green,      │   conform    reject     aggregate  Postgres    (curated serving)
-  2024+2025) ─┘   nothing    dedupe
-                  rejected   derive
-                             enrich
-       Kafka ──► STREAM ──► 5-min windows ──► ClickHouse (ReplacingMergeTree)
+  NYC TLC parquet
+  ┌──────────────┐
+  │ yellow 2024  │──┐
+  │ yellow 2025  │  │   ┌─────────┐   ┌─────────┐   ┌────────┐   ┌──────────────┐
+  │ green  2024  │──┼──►│ BRONZE  │──►│ SILVER  │──►│  GOLD  │──►│  ClickHouse  │
+  │ zone lookup  │──┘   │         │   │         │   │        │   │   (marts)    │
+  └──────────────┘      │ conform │   │ reject  │   │ 4 aggs │   ├──────────────┤
+                        │ nothing │   │ dedupe  │   │        │   │   Postgres   │
+                        │ dropped │   │ derive  │   │        │   │  (serving)   │
+                        └─────────┘   │ enrich  │   └────────┘   └──────────────┘
+                                      └────┬────┘
+                                           │  ▲
+                                    DQ GATE│  │ blocks publication
+                                           ▼  │ if a FAIL rule breaches
+  ┌──────────┐   ┌──────────────┐   ┌──────────────────┐
+  │  Kafka   │──►│  STRUCTURED  │──►│   ClickHouse     │
+  │  events  │   │  STREAMING   │   │ ReplacingMerge   │
+  └──────────┘   │ 5-min windows│   │ Tree (versioned) │
+                 └──────────────┘   └──────────────────┘
 
-                     ┌──────────── Postgres control plane ────────────┐
-                     │ runs · metrics · DQ results · lineage graph    │
-                     │ schema registry · processing units · manifests │
-                     └────────────────────────────────────────────────┘
+  ┌──────────────────── Postgres control plane ─────────────────────┐
+  │  etl_run · etl_run_metric · dq_rule · dq_result                 │
+  │  processing_unit · unit_manifest · schema_version               │
+  │  lineage_node · lineage_edge · stream_epoch · benchmark_run     │
+  └─────────────────────────────────────────────────────────────────┘
 ```
 
-Postgres is **not** a second copy of the warehouse. It is the metadata plane, and that separation
-is what makes the governance claims checkable rather than decorative.
+Postgres is **not** a second copy of the warehouse. It is the metadata plane — what ran, what
+it read and wrote, whether the data passed its rules, how datasets derive from one another,
+and how schemas changed. That separation is what makes the governance claims checkable rather
+than decorative.
 
-| Module | Contains |
+| Module | Responsibility |
 |---|---|
 | `platform-common` | control plane, schema registry, trip key, stream version, run context |
 | `platform-ingest` | staged-publish protocol, source normalization, bronze job, staging cleaner |
@@ -57,21 +76,95 @@ is what makes the governance claims checkable rather than decorative.
 
 ---
 
-## The three decisions that shaped everything
+## How the results were arrived at
+
+This is the part worth reading. The numbers above are only meaningful because of how they
+were produced.
+
+### The benchmark refuses to report a number it cannot defend
+
+Before any timing is accepted, both configurations must produce **byte-identical output** over
+**identically fingerprinted input**. If they diverge, the reporter emits no headline at all and
+says why.
+
+That gate earned its place. On real data it rejected the first run:
+
+```
+NO HEADLINE: [correctness gate failed for [optimized]]
+```
+
+The cause was a genuine error: the "partition pruning" optimization was a `WHERE year IN
+(2024, 2025)` filter, and the January 2024 file contains rows with pickup years **2002, 2009
+and 2023** — corrupt meter timestamps. The optimized configuration was faster partly because
+it silently processed *less data*, and produced a different answer.
+
+Without the gate, that ships as a performance win. The filter is now part of the workload for
+every configuration; the flag controls only *where* it runs.
+
+### The baseline is honest
+
+A tempting baseline is "Spark defaults with adaptive execution disabled". That would be
+dishonest — **AQE is on by default in Spark 3.5**, so disabling it is a handicap, not a
+default. Three configurations are reported, and the headline names which one it compares
+against:
+
+| config | median | mean | sd | n |
+|---|---|---|---|---|
+| `naive_app` (baseline) | 1706ms | 1720ms | 82.0ms | 5 |
+| `spark_default` | 1682ms | 1739ms | 113.1ms | 5 |
+| `optimized` | **1460ms** | 1433ms | 48.8ms | 5 |
+
+Improvement is computed from **medians**, because Docker on a laptop produces occasional
+outliers and one disturbed run should not move the figure.
+
+### Expected outputs were written before the code
+
+The golden dataset in [`tests/golden/`](tests/golden/) was computed **by hand before the
+transformations existed**. Silver satisfied it on the first run. Nothing was back-filled from
+actual output — and when later rule changes were made, the golden expectations stayed
+unchanged, which is what confirmed those rows were legitimately valid.
+
+### Every guarantee is deliberately broken to prove its test catches it
+
+`./scripts/test-the-tests.sh` breaks 44 guarantees one at a time and asserts the defending test
+goes red. A test that stays green against a broken implementation is a defect in the test.
+
+This has caught real problems, including two of my own tests that were passing vacuously.
+
+### Real data found what 19 rows could not
+
+Every suite passed against a hand-written fixture. Running on 6.5M real rows immediately
+surfaced four defects the fixture structurally could not contain:
+
+- **Null fares slipping through the filter.** `fare_amount < 0` evaluates to *NULL*, not true,
+  when the fare is null — so null-fare rows passed silver's rejection and were caught
+  downstream. The exact three-valued-logic trap the data-quality null policy was built to
+  expose, appearing in production data.
+- **48,231 rows (0.76%)** reporting sub-30-second or multi-day durations — meter faults.
+- **One row with an $863,372.12 fare for a 1.6-mile trip.** Left in, it would have dominated
+  every revenue aggregate it touched.
+- **The data-quality gate passing having evaluated zero rules**, because a dataset name matched
+  nothing. On a real deployment, a typo would mean DQ checks nothing and publishes.
+
+---
+
+## The three decisions that shaped the design
 
 ### 1. The commit point is a Postgres insert, not files on disk
 
-Writing files into the target does **not** commit a processing unit — the `unit_manifest` row does.
-
-This moves atomicity off a filesystem that cannot promise an atomic directory swap and onto one
-that can. The filesystem only has to be *recoverable*, not transactional.
+Writing files into the target does **not** commit a unit — the `unit_manifest` row does. This
+moves atomicity off a filesystem that cannot promise an atomic directory swap and onto one that
+can.
 
 The consequence: **files in the target are never trusted alone.** An uncommitted target is
-indistinguishable from a partial write, so it is always discarded rather than adopted. Adopting it
-would mean treating "bytes exist" as "the write finished" — the assumption that turns a crash into
-silent data loss.
+indistinguishable from a partial write, so it is discarded rather than adopted. Adopting it
+would mean treating "bytes exist" as "the write finished" — the assumption that turns a crash
+into silent data loss.
 
-### 2. Data quality gates publication, and is evaluated on staged output
+A seven-site failpoint matrix crashes the protocol at each boundary and asserts what the next
+run does.
+
+### 2. Data quality gates publication, evaluated on staged output
 
 ```
 transform → write staging → evaluate DQ on the staged data
@@ -79,101 +172,105 @@ transform → write staging → evaluate DQ on the staged data
           → promote → manifest (COMMIT) → COMPLETE → lineage
 ```
 
-Evaluating in memory would test a plan Spark might recompute differently on write. Evaluating after
-promotion would mean invalid data is already served when the alarm fires.
+Evaluating in memory would test a plan Spark might recompute differently on write. Evaluating
+after promotion would mean invalid data is already served when the alarm fires.
 
 ### 3. Streaming is at-least-once, not exactly-once
 
-A crash between ClickHouse accepting a batch and Spark committing checkpoint progress redelivers
-that batch. Claiming exactly-once would assert a transaction boundary that does not exist across
-those two systems.
+A crash between ClickHouse accepting a batch and Spark committing checkpoint progress
+redelivers that batch. Claiming exactly-once would assert a transaction boundary that does not
+exist across those two systems.
 
-What makes redelivery harmless is two properties, both tested: the `foreachBatch` body is a pure
-function of its input, and the sink is a `ReplacingMergeTree` keyed on the window with a monotonic
-version.
+What makes redelivery harmless is tested: the `foreachBatch` body is a pure function of its
+input, and the sink is a `ReplacingMergeTree` with a monotonic version. The strongest test
+asserts **streaming final state == batch-computed final state**, including after a mid-stream
+kill.
 
 ---
 
 ## Claim → evidence
 
-Nothing here is asserted without a test that fails when the guarantee is broken.
-
-| Claim | Evidence |
+| Claim | Backed by |
 |---|---|
-| **Schema evolution** | `SchemaCompatibilityTest`, `SchemaProperties` (jqwik), `SchemaRegistryIT` — the real TLC 2024→2025 `cbd_congestion_fee` addition; `SilverSchemaEvolutionIT` proves a breaking change publishes nothing |
-| **Data-quality enforcement** | `DqEngineTest` (rule × null-policy × cardinality cross-product), `SilverDqGateIT` — a breached FAIL rule leaves no target, no manifest, no lineage |
-| **Idempotent / restart-safe batch** | `PublishProtocolIT` — a 7-site failpoint matrix, manifest reconciliation, repeated retry, concurrent claims |
-| **Restart-safe streaming** | `StreamRecoveryIT` — streaming final state == batch-computed final state, including after a mid-stream stop; `ReplacingMergeTreeIT` verifies replacement experimentally |
-| **Lineage / governance** | `LineageRecorderIT`, `E2EPipelineIT` graph assertions, `verify-platform.sh` global invariants |
-| **Performance** | `BenchmarkStatisticsTest`, `BenchmarkReportTest`, `BenchmarkIT` — measured 14.4% on 6.3M real rows |
-| **Scale** | `RealDataAcceptanceIT` — 6,496,401 real rows ingested, 6,262,830 through silver |
-
-Run `./scripts/test-the-tests.sh` to see each guarantee deliberately broken and its test go red.
+| **Schema evolution** | `SchemaRegistryIT` — the real 2024→2025 `cbd_congestion_fee` addition; `SilverSchemaEvolutionIT` proves a breaking change publishes nothing |
+| **Data-quality enforcement** | `DqEngineTest` (rule × null-policy × cardinality), `SilverDqGateIT` — a breached FAIL rule leaves no target, no manifest, no lineage |
+| **Idempotent / restart-safe batch** | `PublishProtocolIT` — 7-site failpoint matrix, manifest reconciliation, concurrent claims |
+| **Restart-safe streaming** | `StreamRecoveryIT`, `ReplacingMergeTreeIT`, `StreamEpochIT` |
+| **Lineage / governance** | `LineageRecorderIT`, `E2EPipelineIT`, `verify-platform.sh` |
+| **Scale** | `RealDataAcceptanceIT` — 6.5M real rows end to end |
+| **Performance** | `BenchmarkIT` + correctness gate — measured 14.4% |
 
 ---
 
 ## What is *not* claimed
 
-Listed explicitly, because the absence of a claim is easy to miss.
+Listed because absence of a caveat reads as a claim.
 
-- **No measured performance figure yet.** The harness is built and verified, but the integration
-  test runs on a 14-row fixture where Spark's fixed overhead dominates — any percentage from it
-  would be noise. A real figure requires `./scripts/run-bench.sh` against the full TLC dataset.
-  Until that runs, there is infrastructure but no result.
-- **Not exactly-once streaming.** See above.
-- **Promotion is not atomic.** What is guaranteed is that the pipeline never incrementally writes
-  into a live partition, and that every interruption point has a recovery test.
-- **`trip_key` is a derived deduplication key**, not a source primary key. TLC data has no unique
-  trip id. Tests measure the *duplicate-key rate*; SHA-256 collisions are not measurable at this
-  scale and are not claimed.
-- **Kryo serialization is not benchmarked.** `spark.serializer` is fixed at session creation, so
-  the harness cannot vary it. Including it would have meant claiming a measurement that never
-  happened.
-- **`agg_zone_hourly` does not exercise grouping** in the fixture — every row falls in a distinct
-  group. Grouping is covered by the other three aggregates.
+- **Not exactly-once streaming.** At-least-once into an idempotent sink.
+- **Promotion is not atomic.** What is guaranteed is that the pipeline never incrementally
+  writes into a live partition, and every interruption point has a recovery test.
+- **`trip_key` is a derived deduplication key**, not a source primary key — TLC data has no
+  unique trip id. Tests measure the duplicate-key rate; hash collisions are not measurable at
+  this scale and are not claimed.
+- **The 14.4% understates what tuning can achieve, and the benchmark says so.** It currently
+  aggregates a cached DataFrame on a local session, which makes partition pruning, column
+  pruning and `maxPartitionBytes` near-inert. Reading from Parquet on the real cluster would
+  measure them properly. That work is identified, not done.
+- **Kryo serialization is not benchmarked** — `spark.serializer` is fixed at session creation,
+  so the harness cannot vary it. Including it would have meant claiming a measurement that
+  never happened.
 
 ---
 
-## Reading `stream_trip_window` correctly
-
-**Spark cannot express `FINAL`.** Its parser has no such modifier, so
-`SELECT ... FROM t FINAL` parses `FINAL` as a table *alias*: the query is accepted, runs against
-the raw table, and silently returns duplicates with no error.
-
-A Spark consumer must use `max_by(value, version)` grouped on the window key. A ClickHouse-native
-client can use `FINAL`. Either is correct; reading it plainly through Spark is not.
-
----
-
-## Verification
+## Running it
 
 ```bash
-./scripts/test.sh              # fast loop: unit + component
-./scripts/test-integration.sh  # against the live stack
-./scripts/test-e2e.sh          # raw → bronze → silver → gold + streaming
-./scripts/verify-platform.sh   # global control-plane invariants
-./scripts/verify-all.sh        # Tier 0 + 1 + 2 — the release gate
-./scripts/verify-hardening.sh  # Tier 3: nondeterminism, resource pressure, fuzzing
-./scripts/run-bench.sh         # produces docs/results/benchmark.md
+./scripts/init-secrets.sh                              # generate .env (gitignored)
+docker compose --env-file .env -f docker/docker-compose.yml up -d
+./scripts/test.sh                                      # fast: unit + component
+./scripts/verify-all.sh                                # the full gate
 ```
 
-`verify-all.sh` exits 0 only when every stage passes: environment, compile, tests + coverage gates,
-SQL constraint rejection, mutation testing, global invariants, secret scan, and test isolation.
+Requires **JDK 17** specifically — Spark 3.5 rejects newer JDKs. `scripts/env.sh` pins
+`JAVA_HOME`.
+
+To reproduce the results:
+
+```bash
+./scripts/fetch-data.sh          # 106 MB of real TLC data
+./scripts/test-acceptance.sh     # the full pipeline on 6.5M rows
+./scripts/run-bench.sh           # regenerates docs/results/benchmark.md
+```
+
+| Script | Scope |
+|---|---|
+| `test.sh` | unit + component, no services |
+| `test-integration.sh` | against the live stack |
+| `test-e2e.sh` | raw → bronze → silver → gold + streaming |
+| `verify-platform.sh` | 19 global control-plane invariants |
+| `verify-all.sh` | Tier 0 + 1 + 2 — the release gate, 8 stages |
+| `verify-hardening.sh` | Tier 3: nondeterminism, resource pressure, property expansion |
+| `test-the-tests.sh` | breaks 44 guarantees, asserts each test goes red |
+
+**CI** runs the deterministic subset on every push: compile, unit and component tests, coverage
+gates, secret scanning, and the SQL schema against a real Postgres. The suites needing a
+five-service stack and a 106 MB download stay explicitly invoked — a gate slow enough to route
+around protects nothing.
 
 ---
 
 ## Operational notes
 
-- **Docker VM memory is the binding constraint.** Spark, Postgres, ClickHouse and Kafka share one
-  7.65 GB VM; the stack is budgeted to ~6.75 GB. Raising Docker Desktop to 12 GB is the escape
-  hatch if executors are OOM-killed.
+- **Docker VM memory is the binding constraint.** Spark, Postgres, ClickHouse and Kafka share
+  one 7.65 GB VM; the stack is budgeted to ~6.75 GB.
 - **`clickhouse-jdbc` is deliberately absent.** Its SQL lexer is ANTLR-4.13-generated and Spark
-  3.5's parsers are 4.9.3-generated; the two cannot share a JVM, and the `-all` jar bundles ANTLR
-  un-relocated so no exclusion can fix it. ClickHouse is reached through the native Spark connector
-  for writes and its HTTP interface for anything needing `FINAL`.
-- **Do not keep this repository in an iCloud-synced directory.** iCloud duplicates files it sees
-  change mid-write, producing `Foo 2.java` beside `Foo.java`, which breaks compilation and can be
-  committed. `.gitignore` has no effect on it.
+  3.5's parsers are 4.9.3-generated; they cannot share a JVM, and the `-all` jar bundles ANTLR
+  un-relocated so no Maven exclusion fixes it. ClickHouse is reached through the native Spark
+  connector and its HTTP interface.
+- **Spark cannot express `FINAL`.** It parses as a table *alias*, so a plain Spark read of
+  `stream_trip_window` silently returns duplicates. Use `max_by(value, version)`.
+- **Do not keep this repository in an iCloud-synced directory.** iCloud duplicates files it
+  sees change mid-write, producing `Foo 2.java` beside `Foo.java`.
 
-See [`docs/architecture.md`](docs/architecture.md) for the publish protocol, failure semantics and
-recovery matrix.
+Full design rationale and failure semantics: [`docs/architecture.md`](docs/architecture.md).
+Generated verification report: [`docs/results/testing.md`](docs/results/testing.md).

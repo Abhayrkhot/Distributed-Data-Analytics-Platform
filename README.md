@@ -202,26 +202,6 @@ kill.
 
 ---
 
-## What is *not* claimed
-
-Listed because absence of a caveat reads as a claim.
-
-- **Not exactly-once streaming.** At-least-once into an idempotent sink.
-- **Promotion is not atomic.** What is guaranteed is that the pipeline never incrementally
-  writes into a live partition, and every interruption point has a recovery test.
-- **`trip_key` is a derived deduplication key**, not a source primary key — TLC data has no
-  unique trip id. Tests measure the duplicate-key rate; hash collisions are not measurable at
-  this scale and are not claimed.
-- **The 14.4% understates what tuning can achieve, and the benchmark says so.** It currently
-  aggregates a cached DataFrame on a local session, which makes partition pruning, column
-  pruning and `maxPartitionBytes` near-inert. Reading from Parquet on the real cluster would
-  measure them properly. That work is identified, not done.
-- **Kryo serialization is not benchmarked** — `spark.serializer` is fixed at session creation,
-  so the harness cannot vary it. Including it would have meant claiming a measurement that
-  never happened.
-
----
-
 ## Running it
 
 ```bash
@@ -258,19 +238,3 @@ five-service stack and a 106 MB download stay explicitly invoked — a gate slow
 around protects nothing.
 
 ---
-
-## Operational notes
-
-- **Docker VM memory is the binding constraint.** Spark, Postgres, ClickHouse and Kafka share
-  one 7.65 GB VM; the stack is budgeted to ~6.75 GB.
-- **`clickhouse-jdbc` is deliberately absent.** Its SQL lexer is ANTLR-4.13-generated and Spark
-  3.5's parsers are 4.9.3-generated; they cannot share a JVM, and the `-all` jar bundles ANTLR
-  un-relocated so no Maven exclusion fixes it. ClickHouse is reached through the native Spark
-  connector and its HTTP interface.
-- **Spark cannot express `FINAL`.** It parses as a table *alias*, so a plain Spark read of
-  `stream_trip_window` silently returns duplicates. Use `max_by(value, version)`.
-- **Do not keep this repository in an iCloud-synced directory.** iCloud duplicates files it
-  sees change mid-write, producing `Foo 2.java` beside `Foo.java`.
-
-Full design rationale and failure semantics: [`docs/architecture.md`](docs/architecture.md).
-Generated verification report: [`docs/results/testing.md`](docs/results/testing.md).

@@ -105,7 +105,8 @@ Nothing here is asserted without a test that fails when the guarantee is broken.
 | **Idempotent / restart-safe batch** | `PublishProtocolIT` — a 7-site failpoint matrix, manifest reconciliation, repeated retry, concurrent claims |
 | **Restart-safe streaming** | `StreamRecoveryIT` — streaming final state == batch-computed final state, including after a mid-stream stop; `ReplacingMergeTreeIT` verifies replacement experimentally |
 | **Lineage / governance** | `LineageRecorderIT`, `E2EPipelineIT` graph assertions, `verify-platform.sh` global invariants |
-| **Performance** | `BenchmarkStatisticsTest`, `BenchmarkReportTest`, `BenchmarkIT` — see the caveat below |
+| **Performance** | `BenchmarkStatisticsTest`, `BenchmarkReportTest`, `BenchmarkIT` — measured 14.4% on 6.3M real rows |
+| **Scale** | `RealDataAcceptanceIT` — 6,496,401 real rows ingested, 6,262,830 through silver |
 
 Run `./scripts/test-the-tests.sh` to see each guarantee deliberately broken and its test go red.
 

@@ -68,16 +68,54 @@ class BenchmarkIT {
         SilverTransform.registerUdfs(spark);
     }
 
+    /**
+     * Real TLC data when present, the fixture otherwise.
+     *
+     * <p>A benchmark on 14 rows measures Spark's fixed startup overhead and nothing else, so any
+     * percentage from it would be noise. The suite still runs on the fixture — it is verifying the
+     * apparatus, not producing a figure — but a real measurement requires real volume, and
+     * scripts/run-bench.sh sets BENCH_REAL_DATA to demand it.
+     */
+    private static boolean realDataAvailable() {
+        return java.nio.file.Files.isRegularFile(
+                Fixtures.repoRoot().resolve("data/raw/yellow_tripdata_2024-01.parquet"));
+    }
+
     @BeforeEach
     void setUp() {
         runId = controlPlane.startRun(RunSpec.of("IT-bench-" + UUID.randomUUID()));
 
-        Dataset<Row> bronze = SourceNormalizer.normalizeYellow(Fixtures.yellow2024())
-                .union(SourceNormalizer.normalizeYellow(Fixtures.yellow2025()))
-                .union(SourceNormalizer.normalizeGreen(Fixtures.green2024()));
-        silver = SilverTransform.transform(bronze, Fixtures.taxiZones()).cache();
+        boolean useReal = realDataAvailable()
+                && Boolean.parseBoolean(System.getenv().getOrDefault("BENCH_REAL_DATA", "false"));
+
+        Dataset<Row> bronze;
+        Dataset<Row> zones;
+        if (useReal) {
+            java.nio.file.Path raw = Fixtures.repoRoot().resolve("data/raw");
+            bronze = SourceNormalizer.normalizeYellow(
+                            spark.read().parquet(raw.resolve("yellow_tripdata_2024-01.parquet").toString()))
+                    .union(SourceNormalizer.normalizeYellow(
+                            spark.read().parquet(raw.resolve("yellow_tripdata_2025-01.parquet").toString())))
+                    .union(SourceNormalizer.normalizeGreen(
+                            spark.read().parquet(raw.resolve("green_tripdata_2024-01.parquet").toString())));
+            zones = spark.read().option("header", "true").option("inferSchema", "true")
+                    .csv(raw.resolve("taxi_zone_lookup.csv").toString());
+        } else {
+            bronze = SourceNormalizer.normalizeYellow(Fixtures.yellow2024())
+                    .union(SourceNormalizer.normalizeYellow(Fixtures.yellow2025()))
+                    .union(SourceNormalizer.normalizeGreen(Fixtures.green2024()));
+            zones = Fixtures.taxiZones();
+        }
+
+        zoneDimension = zones;
+        silver = SilverTransform.transform(bronze, zones).cache();
         inputProfile = CorrectnessGate.profileInput(silver, 0, 1);
+        if (useReal) {
+            System.out.printf("%n  benchmark input: %,d real rows%n", inputProfile.rowCount());
+        }
     }
+
+    private Dataset<Row> zoneDimension;
 
     @AfterEach
     void cleanUp() throws Exception {
@@ -100,7 +138,7 @@ class BenchmarkIT {
 
     private BenchmarkHarness.Workload workload() {
         return (session, benchConfig) ->
-                GoldWorkload.aggregate(silver, Fixtures.taxiZones(), benchConfig);
+                GoldWorkload.aggregate(silver, zoneDimension, benchConfig);
     }
 
     private List<BenchmarkObservation> runConfigs(List<BenchmarkConfig> configs, Plan plan) {
@@ -136,9 +174,9 @@ class BenchmarkIT {
         @DisplayName("pruning and broadcasting do not change the aggregate")
         void optimizationsPreserveTheAnswer() {
             Dataset<Row> naive = GoldWorkload.aggregate(
-                    silver, Fixtures.taxiZones(), BenchmarkConfig.naiveApp());
+                    silver, zoneDimension, BenchmarkConfig.naiveApp());
             Dataset<Row> optimized = GoldWorkload.aggregate(
-                    silver, Fixtures.taxiZones(), BenchmarkConfig.optimized());
+                    silver, zoneDimension, BenchmarkConfig.optimized());
 
             assertThat(CorrectnessGate.compare("naive", naive, "optimized", optimized))
                     .as("identical output, different plan").isEmpty();
@@ -170,9 +208,9 @@ class BenchmarkIT {
         @DisplayName("the physical plan is captured for both configurations")
         void plansAreCaptured() {
             String naivePlan = GoldWorkload.explain(GoldWorkload.aggregate(
-                    silver, Fixtures.taxiZones(), BenchmarkConfig.naiveApp()));
+                    silver, zoneDimension, BenchmarkConfig.naiveApp()));
             String optimizedPlan = GoldWorkload.explain(GoldWorkload.aggregate(
-                    silver, Fixtures.taxiZones(), BenchmarkConfig.optimized()));
+                    silver, zoneDimension, BenchmarkConfig.optimized()));
 
             assertThat(naivePlan).isNotBlank();
             assertThat(optimizedPlan).isNotBlank();
@@ -218,6 +256,58 @@ class BenchmarkIT {
                     assertThat(rows.getLong(4)).as("environment on every row")
                             .isEqualTo(observations.size());
                 }
+            }
+        }
+
+        /**
+         * Writes the real report when run against real data.
+         *
+         * <p>Gated on BENCH_REAL_DATA so a fixture run cannot overwrite a genuine measurement with
+         * one taken on 14 rows — which would be a number that looks official and means nothing.
+         */
+        @Test
+        @DisplayName("writes docs/results/benchmark.md when run against real data")
+        void writesRealReport() {
+            org.junit.jupiter.api.Assumptions.assumeTrue(
+                    Boolean.parseBoolean(System.getenv().getOrDefault("BENCH_REAL_DATA", "false")),
+                    "fixture run: not overwriting the real report");
+
+            java.util.List<BenchmarkConfig> configs = java.util.List.of(
+                    BenchmarkConfig.sparkDefault(),
+                    BenchmarkConfig.naiveApp(),
+                    BenchmarkConfig.optimized());
+
+            java.util.List<BenchmarkObservation> observations =
+                    new BenchmarkHarness(spark, inputProfile)
+                            .run(configs, workload(), "naive_app", Plan.standard());
+
+            new BenchmarkStore(connections).record(runId, observations,
+                    BenchmarkStore.Environment.capture(spark, gitCommit()));
+
+            BenchmarkReport report = new BenchmarkReport(observations);
+            java.nio.file.Path target =
+                    Fixtures.repoRoot().resolve("docs/results/benchmark.md");
+            MarkdownReportWriter.write(target, report,
+                    BenchmarkStore.Environment.capture(spark, gitCommit()),
+                    java.util.List.of("spark_default", "naive_app", "optimized"));
+
+            report.headline().ifPresentOrElse(
+                    h -> System.out.printf("%n  MEASURED: %s%n", h.claim()),
+                    () -> System.out.printf("%n  NO HEADLINE: %s%n", report.invalidReasons()));
+
+            assertThat(java.nio.file.Files.exists(target)).isTrue();
+        }
+
+        private String gitCommit() {
+            try {
+                Process p = new ProcessBuilder("git", "rev-parse", "--short", "HEAD")
+                        .directory(Fixtures.repoRoot().toFile()).start();
+                try (var r = new java.io.BufferedReader(
+                        new java.io.InputStreamReader(p.getInputStream()))) {
+                    return r.readLine();
+                }
+            } catch (java.io.IOException e) {
+                return "unknown";
             }
         }
 

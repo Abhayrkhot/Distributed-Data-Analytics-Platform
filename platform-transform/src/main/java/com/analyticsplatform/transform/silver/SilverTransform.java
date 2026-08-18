@@ -39,6 +39,25 @@ public final class SilverTransform {
     /** Maximum plausible trip distance in miles; beyond this the meter is wrong, not the trip. */
     public static final double MAX_TRIP_DISTANCE_MI = 300.0;
 
+    /** Shortest duration that can be a real trip. Below this the meter started and stopped. */
+    public static final double MIN_TRIP_DURATION_MIN = 0.5;
+
+    /** Longest plausible duration: 24 hours. Beyond this the meter was left running. */
+    public static final double MAX_TRIP_DURATION_MIN = 1440.0;
+
+    /**
+     * Largest plausible fare.
+     *
+     * <p>Real TLC data contains exactly one row in 6.4M with a fare of $863,372.12 — for a
+     * 1.6-mile trip. That is a meter fault, not an expensive journey, and left in it would dominate
+     * every revenue aggregate it touched.
+     *
+     * <p>Deliberately the same bound as the {@code silver_fare_non_negative} DQ rule. The
+     * relationship is intentional: silver filters, DQ asserts the filter worked. If this constant
+     * and that rule ever diverge, the gate fires — which is the desired behaviour, not a nuisance.
+     */
+    public static final double MAX_FARE_AMOUNT = 10_000.0;
+
     private static final String TRIP_KEY_UDF = "platform_trip_key";
 
     /** TLC payment type codes. */
@@ -88,8 +107,27 @@ public final class SilverTransform {
     public enum RejectReason {
         NULL_TIMESTAMP("null_timestamp"),
         DROPOFF_NOT_AFTER_PICKUP("dropoff_not_after_pickup"),
+        /**
+         * A null fare or total.
+         *
+         * <p>Added after real-data acceptance: {@code fare_amount < 0} is NULL when the fare is
+         * NULL, not true, so a null-fare row passed the filter and was then caught downstream by
+         * the DQ range rule. Two-valued thinking about a nullable column — the exact trap the DQ
+         * null policy exists to make visible, showing up in production data.
+         */
+        NULL_AMOUNT("null_amount"),
         NEGATIVE_FARE("negative_fare"),
-        DISTANCE_OUT_OF_RANGE("distance_out_of_range");
+        /** A fare beyond any plausible journey — a meter fault. See {@link #MAX_FARE_AMOUNT}. */
+        FARE_OUT_OF_RANGE("fare_out_of_range"),
+        DISTANCE_OUT_OF_RANGE("distance_out_of_range"),
+        /**
+         * Duration outside plausibility.
+         *
+         * <p>0.76% of real trips (48,231 of 6.3M) report a sub-30-second or multi-day duration.
+         * These are meter errors, not trips: a zero-length duration also makes avg_speed_mph
+         * meaningless, so they are removed rather than carried with a null derived column.
+         */
+        DURATION_OUT_OF_RANGE("duration_out_of_range");
 
         private final String code;
 
@@ -114,12 +152,34 @@ public final class SilverTransform {
                         lit(RejectReason.NULL_TIMESTAMP.code()))
                 .when(col("dropoff_ts").leq(col("pickup_ts")),
                         lit(RejectReason.DROPOFF_NOT_AFTER_PICKUP.code()))
+                // Checked BEFORE the comparison below, because `fare_amount < 0` evaluates to
+                // NULL rather than true when the fare is null, so a null would otherwise slip
+                // through into silver and only surface as a DQ breach.
+                .when(col("fare_amount").isNull().or(col("total_amount").isNull()),
+                        lit(RejectReason.NULL_AMOUNT.code()))
                 .when(col("fare_amount").lt(0).or(col("total_amount").lt(0)),
                         lit(RejectReason.NEGATIVE_FARE.code()))
+                .when(col("fare_amount").gt(MAX_FARE_AMOUNT)
+                                .or(col("total_amount").gt(MAX_FARE_AMOUNT)),
+                        lit(RejectReason.FARE_OUT_OF_RANGE.code()))
+                .when(durationMinutes().lt(MIN_TRIP_DURATION_MIN)
+                                .or(durationMinutes().gt(MAX_TRIP_DURATION_MIN)),
+                        lit(RejectReason.DURATION_OUT_OF_RANGE.code()))
                 .when(col("trip_distance_mi").lt(0)
                                 .or(col("trip_distance_mi").gt(MAX_TRIP_DISTANCE_MI)),
                         lit(RejectReason.DISTANCE_OUT_OF_RANGE.code()))
                 .otherwise(lit(null).cast(DataTypes.StringType));
+    }
+
+    /**
+     * Trip duration in minutes, from the raw timestamps.
+     *
+     * <p>Needed during rejection, which runs before the derived columns exist.
+     */
+    private static Column durationMinutes() {
+        return unix_timestamp(col("dropoff_ts"))
+                .minus(unix_timestamp(col("pickup_ts")))
+                .cast(DataTypes.DoubleType).divide(lit(60.0));
     }
 
     /** Rows that will not reach silver, each with its reason. */

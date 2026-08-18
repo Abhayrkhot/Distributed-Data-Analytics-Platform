@@ -96,6 +96,15 @@ public final class SilverTransformJob {
      */
     private final String dataset;
 
+    /**
+     * Whether an empty rule set aborts the run.
+     *
+     * <p>Defaults to true. A silver dataset with no rules is nearly always a name mismatch, and
+     * the failure is silent: the gate passes because there was nothing to fail. The opt-out exists
+     * for a dataset that legitimately has none, so the guard is explicit rather than absent.
+     */
+    private final boolean requireRules;
+
     private final SparkSession spark;
     private final SchemaRegistry schemaRegistry;
     private final DqRuleStore ruleStore;
@@ -111,6 +120,20 @@ public final class SilverTransformJob {
             DqEngine dqEngine,
             StagedPublisher publisher,
             LineageRecorder lineage) {
+        this(spark, dataset, schemaRegistry, ruleStore, dqEngine, publisher, lineage, true);
+    }
+
+    /** @param requireRules when false, a dataset with no DQ rules may publish */
+    public SilverTransformJob(
+            SparkSession spark,
+            String dataset,
+            SchemaRegistry schemaRegistry,
+            DqRuleStore ruleStore,
+            DqEngine dqEngine,
+            StagedPublisher publisher,
+            LineageRecorder lineage,
+            boolean requireRules) {
+        this.requireRules = requireRules;
         this.dataset = dataset;
         this.spark = spark;
         this.schemaRegistry = schemaRegistry;
@@ -171,6 +194,21 @@ public final class SilverTransformJob {
     }
 
     private Report evaluate(Dataset<Row> staged, List<DqRule> rules, Dataset<Row> zones) {
+        // A silver dataset with no enabled rules is almost always a misconfiguration - most often
+        // a dataset name that does not match what the rules were registered against. Without this
+        // the gate evaluates nothing, reports success, and publishes: a clean bill of health from
+        // a check that never ran.
+        //
+        // Found by the real-data acceptance run, where the gate passed having evaluated zero
+        // rules. Every fixture-based suite had missed it because they install their own rules.
+        if (rules.isEmpty() && requireRules) {
+            throw new IllegalStateException(
+                    "no enabled data-quality rules exist for " + dataset + ". Publishing would "
+                            + "mean passing a gate that checked nothing. Register rules in "
+                            + "control.dq_rule, or construct this job with requireRules=false if "
+                            + "the dataset genuinely has none.");
+        }
+
         List<DqRule> inapplicable = DqEngine.inapplicable(staged, rules);
         if (!inapplicable.isEmpty()) {
             // A rule pointing at a column that does not exist is a configuration error, not a

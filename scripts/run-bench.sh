@@ -46,6 +46,8 @@ PG_JDBC_URL="$PG_JDBC_URL_LOCAL" \
 CH_JDBC_URL="$CH_JDBC_URL_LOCAL" \
 KAFKA_BOOTSTRAP="$KAFKA_BOOTSTRAP_HOST" \
 BENCH_PLAN="$PLAN" \
+    BENCH_REAL_DATA=true \
+    MAVEN_OPTS="-Xmx4g" \
     mvn -B -Pintegration -Djacoco.skip=true \
         -pl platform-bench \
         -Dtest='BenchmarkIT' \
